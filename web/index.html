@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>实时传感器数据</title>
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.3/css/bulma.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <style>
+        /* 覆盖 Bulma button 默认样式，允许内部多行/弹性布局以容纳更多数据 */
+        #device-selector .button {
+            height: auto;
+            padding: 0.5rem 1rem;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+    </style>
+</head>
+
+<body>
+    <section class="section">
+        <div class="container">
+            <div class="box">
+                <h2 class="title is-4">设备选择与状态</h2>
+                <p class="mb-3">当前显示设备: <strong id="current-device-mac">无</strong></p>
+                <div id="device-selector" class="buttons are-small">
+                </div>
+            </div>
+            <p id="status" class="subtitle is-warning">正在连接服务器...</p>
+
+            <h1 class="title">实时角速度数据 (Gyroscope)</h1>
+            <div class="box">
+                <canvas id="accelChart" width="800" height="300"></canvas>
+            </div>
+
+            <h1 class="title">基于传感器时钟的波形图 (Sensor Uptime)</h1>
+            <div class="box">
+                <canvas id="sensorTimeChart" width="800" height="300"></canvas>
+            </div>
+
+            <h1 class="title">实时行为识别 (Action Recognition)</h1>
+            <div class="box">
+                <canvas id="actionChart" width="800" height="200"></canvas>
+            </div>
+        </div>
+    </section>
+
+    <script src="app.js" defer></script>
+</body>
+
+</html>

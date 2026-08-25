@@ -1,0 +1,45 @@
+tcp:
+  host: "0.0.0.0"
+  port: 7628
+websocket:
+  host: "0.0.0.0"
+  port: 8765
+
+# 网关不要求指定真实 MAC 时保持广播地址；如果固件要求，请改为实际网关 MAC。
+gateway_mac: "FF:FF:FF:FF:FF:FF"
+battery_interval_seconds: 30
+reconnect_interval_seconds: 60
+retention_days: 7
+data_dir: "data"
+
+inference:
+  enabled: true
+  engine_path: "model/convtran.engine"
+  window_size: 50
+  stride: 5
+
+sensor_types:
+  imu948:
+    frequency: 25
+    notify_handle: 0x0008
+    cccd_handle: 0x0009
+    write_handle: 0x0006
+  md9930:
+    frequency: 25
+    notify_handle: 0x000A
+    cccd_handle: 0x000C
+    write_handle: 0x0014
+    command_handle: 0x0012
+
+devices:
+  - mac: "CE:43:75:25:96:BF"
+    type: imu948
+  - mac: "3F:B8:12:EE:3C:37"
+    type: imu948
+  - mac: "27:EE:B8:B3:10:9F"
+    type: imu948
+  - mac: "54:6C:0E:B9:1A:4C"
+    type: md9930
+  - mac: "54:6C:0E:B9:19:EA"
+    type: md9930
+

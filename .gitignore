@@ -1,0 +1,8 @@
+/build/
+/data/
+/logs/
+/model/*.engine
+
+.vscode/
+backup/
+
