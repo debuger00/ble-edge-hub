@@ -1,10 +1,4 @@
-#include "iot/config.hpp"
-#include "iot/json.hpp"
-#include "iot/log.hpp"
-#include "iot/services/database_writer.hpp"
-#include "iot/services/inference_engine.hpp"
-#include "iot/services/tcp_server.hpp"
-#include "iot/services/websocket_server.hpp"
+#include <unistd.h>
 
 #include <atomic>
 #include <csignal>
@@ -14,7 +8,14 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unistd.h>
+
+#include "iot/config.hpp"
+#include "iot/json.hpp"
+#include "iot/log.hpp"
+#include "iot/services/database_writer.hpp"
+#include "iot/services/inference_engine.hpp"
+#include "iot/services/tcp_server.hpp"
+#include "iot/services/websocket_server.hpp"
 
 namespace {
 volatile std::sig_atomic_t interrupted = 0;
@@ -25,8 +26,8 @@ std::string device_list_json(const iot::AppConfig& config) {
   out << "{\"type\":\"device_list\",\"devices\":[";
   for (std::size_t i = 0; i < config.devices.size(); ++i) {
     if (i) out << ',';
-    out << "{\"mac\":\"" << iot::json_escape(config.devices[i].mac)
-        << "\",\"type\":\"" << iot::json_escape(config.devices[i].type) << "\"}";
+    out << "{\"mac\":\"" << iot::json_escape(config.devices[i].mac) << "\",\"type\":\""
+        << iot::json_escape(config.devices[i].type) << "\"}";
   }
   out << "]}";
   return out.str();
@@ -34,7 +35,10 @@ std::string device_list_json(const iot::AppConfig& config) {
 
 void print_gateways(const iot::services::TcpServer& server) {
   const auto snapshots = server.snapshots();
-  if (snapshots.empty()) { std::cout << "当前没有网关连接。\n"; return; }
+  if (snapshots.empty()) {
+    std::cout << "当前没有网关连接。\n";
+    return;
+  }
   for (const auto& gateway : snapshots) {
     std::cout << "网关 " << gateway.id << "  " << gateway.remote_address
               << (gateway.active ? " [在线]" : " [离线]") << '\n';
@@ -55,9 +59,12 @@ int main(int argc, char** argv) {
         std::cout << "Usage: " << argv[0] << " [--config <path>]\n";
         return 0;
       }
-      if (argument == "--config" && i + 1 < argc) config_path = argv[++i];
-      else if (argument.rfind("--", 0) == 0) throw std::invalid_argument("unknown option: " + argument);
-      else config_path = argument;  // backward-compatible positional config path
+      if (argument == "--config" && i + 1 < argc)
+        config_path = argv[++i];
+      else if (argument.rfind("--", 0) == 0)
+        throw std::invalid_argument("unknown option: " + argument);
+      else
+        config_path = argument;  // backward-compatible positional config path
     }
     const auto config = iot::AppConfig::load(config_path);
     std::signal(SIGINT, signal_handler);
@@ -79,12 +86,15 @@ int main(int argc, char** argv) {
         std::uint64_t gateway{};
         input >> command;
         if (command == "q" || command == "quit" || command == "exit") break;
-        if (command == "list") print_gateways(tcp);
+        if (command == "list")
+          print_gateways(tcp);
         else if (command == "connect" && input >> gateway >> mac) {
           if (!tcp.connect_device(gateway, mac)) std::cerr << "连接命令失败：请检查网关 ID 和已配置 MAC。\n";
         } else if (command == "disconnect" && input >> gateway >> mac) {
-          if (!tcp.disconnect_device(gateway, mac)) std::cerr << "断开命令失败：请检查网关 ID 和已配置 MAC。\n";
-        } else if (!command.empty()) std::cerr << "无法识别的命令或参数不完整。\n";
+          if (!tcp.disconnect_device(gateway, mac))
+            std::cerr << "断开命令失败：请检查网关 ID 和已配置 MAC。\n";
+        } else if (!command.empty())
+          std::cerr << "无法识别的命令或参数不完整。\n";
       }
     } else {
       iot::log(iot::LogLevel::info, "running without interactive CLI; send SIGINT or SIGTERM to stop");

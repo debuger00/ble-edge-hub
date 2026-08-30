@@ -30,7 +30,10 @@ if(IOT_ENABLE_TENSORRT)
     message(FATAL_ERROR "TensorRT headers or library not found")
   endif()
   target_sources(iot_core PRIVATE src/inference/tensorrt_backend.cpp)
-  target_include_directories(iot_core PRIVATE ${TENSORRT_INCLUDE_DIR})
+  target_include_directories(iot_core PRIVATE
+    ${TENSORRT_INCLUDE_DIR}
+    ${CUDA_INCLUDE_DIRS}
+    ${CUDA_TOOLKIT_INCLUDE})
   target_link_libraries(iot_core PRIVATE ${TENSORRT_LIBRARY} ${CUDA_CUDART_LIBRARY})
   target_compile_definitions(iot_core PUBLIC IOT_ENABLE_TENSORRT=1)
 endif()
