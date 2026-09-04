@@ -36,7 +36,7 @@ std::string device_list_json(const iot::AppConfig& config) {
 void print_gateways(const iot::services::TcpServer& server) {
   const auto snapshots = server.snapshots();
   if (snapshots.empty()) {
-    std::cout << "当前没有网关连接。\n";
+    std::cout << "当前没有网关连接，请稍候再使用 list 刷新。\n";
     return;
   }
   for (const auto& gateway : snapshots) {
@@ -47,6 +47,23 @@ void print_gateways(const iot::services::TcpServer& server) {
     for (const auto& device : gateway.connected)
       std::cout << "  连接: " << device.mac << " state=" << static_cast<int>(device.state) << '\n';
   }
+}
+
+void print_command_menu() {
+  std::cout << "\n" << std::string(60, '=') << '\n'
+            << "可用命令：\n"
+            << "  list                         - 查看网关和设备状态\n"
+            << "  connect <网关ID> <设备MAC>   - 连接指定传感器\n"
+            << "    示例：connect 0 3F:B8:12:EE:3C:37\n"
+            << "  disconnect <网关ID> <设备MAC> - 断开指定传感器\n"
+            << "    示例：disconnect 0 3F:B8:12:EE:3C:37\n"
+            << "  help / h / ?                 - 再次显示帮助\n"
+            << "  q / quit / exit              - 停止服务并退出\n"
+            << std::string(60, '=') << '\n';
+}
+
+void print_command_prompt() {
+  std::cout << "请输入命令（输入 help 查看帮助）> " << std::flush;
 }
 }  // namespace
 
@@ -78,23 +95,65 @@ int main(int argc, char** argv) {
     websocket.start();
     tcp.start();
     if (isatty(STDIN_FILENO)) {
-      std::cout << "服务已启动。命令: list | connect <网关ID> <MAC> | disconnect <网关ID> <MAC> | q\n";
+      std::cout << "服务已启动。\n";
+      print_command_menu();
       std::string line;
-      while (!interrupted && std::getline(std::cin, line)) {
+      while (!interrupted) {
+        print_command_prompt();
+        if (!std::getline(std::cin, line)) break;
+
         std::istringstream input(line);
         std::string command, mac;
         std::uint64_t gateway{};
         input >> command;
-        if (command == "q" || command == "quit" || command == "exit") break;
-        if (command == "list")
+        if (command.empty()) {
+          std::cout << "未输入命令，请输入 list、connect、disconnect、help 或 q。\n";
+          continue;
+        }
+
+        if (command == "q" || command == "quit" || command == "exit") {
+          std::cout << "正在停止服务，请稍候...\n";
+          break;
+        }
+        if (command == "help" || command == "h" || command == "?") {
+          print_command_menu();
+          continue;
+        }
+        if (command == "list") {
           print_gateways(tcp);
-        else if (command == "connect" && input >> gateway >> mac) {
-          if (!tcp.connect_device(gateway, mac)) std::cerr << "连接命令失败：请检查网关 ID 和已配置 MAC。\n";
-        } else if (command == "disconnect" && input >> gateway >> mac) {
-          if (!tcp.disconnect_device(gateway, mac))
-            std::cerr << "断开命令失败：请检查网关 ID 和已配置 MAC。\n";
-        } else if (!command.empty())
-          std::cerr << "无法识别的命令或参数不完整。\n";
+          continue;
+        }
+
+        if (command == "connect" || command == "disconnect") {
+          if (!(input >> gateway >> mac)) {
+            std::cerr << "命令格式不完整。\n"
+                      << "正确格式：" << command << " <网关ID> <设备MAC>\n"
+                      << "示例：" << command << " 0 3F:B8:12:EE:3C:37\n";
+            continue;
+          }
+
+          std::string extra;
+          if (input >> extra) {
+            std::cerr << "参数过多：" << extra << "\n"
+                      << "请使用：" << command << " <网关ID> <设备MAC>\n";
+            continue;
+          }
+
+          const bool success = command == "connect"
+                                   ? tcp.connect_device(gateway, mac)
+                                   : tcp.disconnect_device(gateway, mac);
+          if (success) {
+            std::cout << (command == "connect" ? "连接" : "断开")
+                      << "命令已发送：网关 ID=" << gateway << "，设备 MAC=" << mac << '\n';
+          } else {
+            std::cerr << (command == "connect" ? "连接" : "断开")
+                      << "命令发送失败。请确认网关 ID、设备 MAC 已配置，并使用 list 查看状态。\n";
+          }
+          continue;
+        }
+
+        std::cerr << "未知命令：" << command << '\n'
+                  << "请输入 help 查看可用命令。\n";
       }
     } else {
       iot::log(iot::LogLevel::info, "running without interactive CLI; send SIGINT or SIGTERM to stop");
