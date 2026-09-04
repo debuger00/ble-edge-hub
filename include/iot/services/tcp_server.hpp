@@ -15,9 +15,7 @@
 
 namespace iot::services {
 
-class DatabaseWriter;
-class InferenceEngine;
-class WebSocketServer;
+class DataPipeline;
 
 struct DiscoveredDevice {
   std::string mac;
@@ -41,8 +39,7 @@ struct GatewaySnapshot {
 
 class TcpServer {
  public:
-  TcpServer(const AppConfig& config, DatabaseWriter& database, WebSocketServer& websocket,
-            InferenceEngine& inference);
+  TcpServer(const AppConfig& config, DataPipeline& pipeline);
   ~TcpServer();
   TcpServer(const TcpServer&) = delete;
   TcpServer& operator=(const TcpServer&) = delete;
@@ -58,9 +55,7 @@ class TcpServer {
   void accept_loop();
 
   const AppConfig& config_;
-  DatabaseWriter& database_;
-  WebSocketServer& websocket_;
-  InferenceEngine& inference_;
+  DataPipeline& pipeline_;
   std::atomic<bool> running_{false};
   int listen_socket_{-1};
   std::thread accept_thread_;
@@ -70,4 +65,3 @@ class TcpServer {
 };
 
 }  // namespace iot::services
-

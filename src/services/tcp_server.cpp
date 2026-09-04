@@ -16,13 +16,10 @@
 #include <stdexcept>
 #include <unordered_set>
 
-#include "iot/json.hpp"
 #include "iot/log.hpp"
 #include "iot/protocol/gateway_codec.hpp"
 #include "iot/protocol/sensor_parser.hpp"
-#include "iot/services/database_writer.hpp"
-#include "iot/services/inference_engine.hpp"
-#include "iot/services/websocket_server.hpp"
+#include "iot/services/data_pipeline.hpp"
 
 namespace iot::services {
 namespace {
@@ -106,15 +103,12 @@ std::string connection_name(ConnectionState state) {
 
 class TcpServer::Session {
  public:
-  Session(std::uint64_t id, int socket, const AppConfig& config, DatabaseWriter& database,
-          WebSocketServer& websocket, InferenceEngine& inference)
+  Session(std::uint64_t id, int socket, const AppConfig& config, DataPipeline& pipeline)
       : id_(id),
         socket_(socket),
         remote_(peer_name(socket)),
         config_(config),
-        database_(database),
-        websocket_(websocket),
-        inference_(inference),
+        pipeline_(pipeline),
         decoder_({[this](const protocol::GatewayFrame& frame) { on_frame(frame); },
                   [this](const ScanEvent& event) { on_scan(event); },
                   [this](const std::string& mac) { return config_.is_allowed_device(mac); },
@@ -271,12 +265,9 @@ class TcpServer::Session {
       return;
     }
     if (auto* sample = std::get_if<SensorSample>(&*parsed)) {
-      if (!database_.enqueue(*sample)) log(LogLevel::warning, "database queue is full; sample dropped");
-      websocket_.broadcast(sample_json(*sample));
-      if (const auto action = inference_.process(*sample))
-        websocket_.broadcast(prediction_json(mac, *action));
+      pipeline_.publish(std::move(*sample));
     } else if (auto* status = std::get_if<SensorStatus>(&*parsed)) {
-      websocket_.broadcast(battery_json(*status));
+      pipeline_.publish(*status);
     }
   }
   void handle_connection(const Bytes& payload) {
@@ -342,9 +333,7 @@ class TcpServer::Session {
   int socket_;
   std::string remote_;
   const AppConfig& config_;
-  DatabaseWriter& database_;
-  WebSocketServer& websocket_;
-  InferenceEngine& inference_;
+  DataPipeline& pipeline_;
   protocol::StreamDecoder decoder_;
   std::atomic<bool> active_{false};
   std::thread worker_;
@@ -356,9 +345,8 @@ class TcpServer::Session {
   std::deque<Bytes> outgoing_;
 };
 
-TcpServer::TcpServer(const AppConfig& config, DatabaseWriter& database, WebSocketServer& websocket,
-                     InferenceEngine& inference)
-    : config_(config), database_(database), websocket_(websocket), inference_(inference) {}
+TcpServer::TcpServer(const AppConfig& config, DataPipeline& pipeline)
+    : config_(config), pipeline_(pipeline) {}
 TcpServer::~TcpServer() { stop(); }
 
 void TcpServer::start() {
@@ -384,7 +372,7 @@ void TcpServer::accept_loop() {
     }
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     const auto id = next_session_id_++;
-    auto session = std::make_shared<Session>(id, client, config_, database_, websocket_, inference_);
+    auto session = std::make_shared<Session>(id, client, config_, pipeline_);
     sessions_[id] = session;
     session->start();
   }

@@ -38,9 +38,9 @@
 
 ```text
 设备接入 → 网关通信 → TCP 字节流重组 → 校验和验证 → 传感器解析
-                                             ├── 异步写入 SQLite
-                                             ├── 滑动窗口 TensorRT 推理
-                                             └── WebSocket 实时广播
+                                             ├── 数据库队列 → SQLite 写入线程
+                                             ├── 推理队列 → TensorRT 推理线程
+                                             └── 发送队列 → WebSocket 广播线程
 ```
 
 ## ✨ 核心特性
@@ -68,6 +68,7 @@
 - 支持 TensorRT C++ 推理后端；
 - 为每个传感器维护独立的滑动窗口；
 - 支持配置窗口长度 `window_size` 和推理步长 `stride`；
+- 使用有界队列和独立工作线程，TensorRT 不阻塞 TCP 接收；
 - 当前行为类别包括 `standing`、`running`、`grazing`、`trotting` 和 `walking`；
 - TensorRT 是可选组件，没有 CUDA/TensorRT 的设备仍可编译采集、存储和测试功能。
 
@@ -82,7 +83,7 @@
 
 ### 📡 实时 WebSocket 推送
 
-服务端向浏览器广播传感器三轴数据、设备电池电量、行为识别结果和初始设备列表。前端使用 HTML、JavaScript 和 Chart.js 展示实时波形、设备在线状态、电池信息和行为识别结果。
+服务端通过有界发送队列和独立线程向浏览器广播传感器三轴数据、设备电池电量、行为识别结果和初始设备列表。慢客户端不会直接阻塞 TCP 接收线程；队列过载时丢弃最旧的实时消息。前端使用 HTML、JavaScript 和 Chart.js 展示实时波形、设备在线状态、电池信息和行为识别结果。
 
 ## 📊 支持的传感器
 
@@ -105,14 +106,18 @@
 │   ├── domain.hpp                  # 传感器数据领域模型
 │   ├── json.hpp                    # WebSocket JSON 消息序列化
 │   ├── log.hpp                     # 日志工具
+│   ├── concurrency/
+│   │   └── bounded_queue.hpp       # 通用有界阻塞队列
 │   ├── protocol/
 │   │   ├── gateway_codec.hpp       # 网关帧解码和控制命令
 │   │   └── sensor_parser.hpp       # 传感器解析接口
 │   ├── services/
 │   │   ├── tcp_server.hpp          # TCP 网关服务
+│   │   ├── data_pipeline.hpp       # 传感器消息分发
 │   │   ├── websocket_server.hpp    # WebSocket 服务
 │   │   ├── database_writer.hpp     # SQLite 异步写入
-│   │   └── inference_engine.hpp    # 推理窗口管理
+│   │   ├── inference_engine.hpp    # 推理窗口管理
+│   │   └── inference_worker.hpp    # 异步推理工作线程
 │   └── inference/
 │       └── tensorrt_backend.hpp    # 可选 TensorRT 后端接口
 ├── src/
@@ -123,9 +128,11 @@
 │   │   └── sensor_parsers.cpp      # IMU948/MD9930 解析实现
 │   ├── services/
 │   │   ├── tcp_server.cpp          # 网关连接和数据分发
+│   │   ├── data_pipeline.cpp       # 多通道非阻塞分发
 │   │   ├── websocket_server.cpp    # 握手和数据广播
 │   │   ├── database_writer.cpp     # SQLite 数据落盘
-│   │   └── inference_engine.cpp    # 滑动窗口推理编排
+│   │   ├── inference_engine.cpp    # 滑动窗口推理编排
+│   │   └── inference_worker.cpp    # 推理队列消费
 │   └── inference/
 │       └── tensorrt_backend.cpp    # TensorRT 推理实现
 ├── tests/
@@ -281,6 +288,7 @@ http://<边缘设备IP>:8000/?wsPort=9000
 
 ```text
 list
+stats
 connect <网关ID> <设备MAC>
 disconnect <网关ID> <设备MAC>
 q
@@ -289,6 +297,7 @@ q
 | 命令 | 功能 |
 |---|---|
 | `list` | 查看网关连接状态、发现的设备和已连接设备 |
+| `stats` | 查看数据库、推理和 WebSocket 队列深度及丢弃计数 |
 | `connect` | 请求指定网关连接指定传感器 |
 | `disconnect` | 请求指定网关断开指定传感器 |
 | `q` | 停止服务、排空数据队列并退出 |
@@ -388,6 +397,21 @@ inference:
 - `engine_path`：TensorRT engine 路径；
 - `window_size`：单次推理使用的采样窗口长度；
 - `stride`：窗口达到完整长度后，每隔多少次更新执行一次推理。
+
+### 队列配置
+
+```yaml
+queues:
+  database_capacity: 30000
+  inference_capacity: 5000
+  websocket_capacity: 4096
+```
+
+- `database_capacity`：等待写入 SQLite 的样本上限，队列满时拒绝新样本；
+- `inference_capacity`：等待推理的样本上限，队列满时丢弃最旧样本，优先保证结果实时性；
+- `websocket_capacity`：等待广播的消息上限，队列满时丢弃最旧消息，避免慢客户端导致内存无限增长。
+
+按 30 台设备、每台 25 Hz（约 750 条/秒）估算，默认容量分别提供约 40 秒、6.7 秒和 5.5 秒的瞬时积压空间。队列容量只能吸收短时抖动；如果队列长度持续增长，应降低推理或展示频率，或提高下游处理能力。
 
 ## 🧠 TensorRT 行为识别
 

@@ -18,6 +18,13 @@ inference:
   window_size: 50
   stride: 5
 
+# 有界队列防止下游变慢时内存无限增长。当前容量分别约可缓存
+# 40 秒数据库数据、6.7 秒推理数据和 5.5 秒 WebSocket 数据（按 750 条/秒估算）。
+queues:
+  database_capacity: 30000
+  inference_capacity: 5000
+  websocket_capacity: 4096
+
 sensor_types:
   imu948:
     frequency: 25

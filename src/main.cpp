@@ -12,8 +12,9 @@
 #include "iot/config.hpp"
 #include "iot/json.hpp"
 #include "iot/log.hpp"
+#include "iot/services/data_pipeline.hpp"
 #include "iot/services/database_writer.hpp"
-#include "iot/services/inference_engine.hpp"
+#include "iot/services/inference_worker.hpp"
 #include "iot/services/tcp_server.hpp"
 #include "iot/services/websocket_server.hpp"
 
@@ -53,6 +54,7 @@ void print_command_menu() {
   std::cout << "\n" << std::string(60, '=') << '\n'
             << "可用命令：\n"
             << "  list                         - 查看网关和设备状态\n"
+            << "  stats                        - 查看数据管道和队列状态\n"
             << "  connect <网关ID> <设备MAC>   - 连接指定传感器\n"
             << "    示例：connect 0 3F:B8:12:EE:3C:37\n"
             << "  disconnect <网关ID> <设备MAC> - 断开指定传感器\n"
@@ -64,6 +66,21 @@ void print_command_menu() {
 
 void print_command_prompt() {
   std::cout << "请输入命令（输入 help 查看帮助）> " << std::flush;
+}
+
+void print_pipeline_stats(const iot::services::DataPipeline& pipeline,
+                          const iot::services::DatabaseWriter& database,
+                          const iot::services::InferenceWorker& inference,
+                          const iot::services::WebSocketServer& websocket) {
+  std::cout << "数据管道状态：\n"
+            << "  数据库队列   " << database.queued() << '/' << database.capacity()
+            << "，拒绝=" << pipeline.database_dropped() << '\n'
+            << "  推理队列     " << inference.queued() << '/' << inference.capacity()
+            << "，丢弃最旧=" << inference.dropped()
+            << "，拒绝=" << pipeline.inference_rejected() << '\n'
+            << "  WebSocket队列 " << websocket.queued_messages() << '/'
+            << websocket.queue_capacity() << "，丢弃最旧=" << websocket.dropped_messages()
+            << "，拒绝=" << pipeline.websocket_rejected() << '\n';
 }
 }  // namespace
 
@@ -87,12 +104,21 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    iot::services::DatabaseWriter database(config.data_dir, config.retention_days);
-    iot::services::InferenceEngine inference(config.inference);
-    iot::services::WebSocketServer websocket(config.websocket, device_list_json(config));
-    iot::services::TcpServer tcp(config, database, websocket, inference);
+    iot::services::DatabaseWriter database(config.data_dir, config.retention_days,
+                                           config.queues.database_capacity);
+    iot::services::WebSocketServer websocket(config.websocket, device_list_json(config),
+                                             config.queues.websocket_capacity);
+    iot::services::InferenceWorker inference(
+        config.inference,
+        [&websocket](const std::string& mac, const std::string& action) {
+          websocket.broadcast(iot::prediction_json(mac, action));
+        },
+        config.queues.inference_capacity);
+    iot::services::DataPipeline pipeline(database, inference, websocket);
+    iot::services::TcpServer tcp(config, pipeline);
 
     websocket.start();
+    inference.start();
     tcp.start();
     if (isatty(STDIN_FILENO)) {
       std::cout << "服务已启动。\n";
@@ -107,7 +133,7 @@ int main(int argc, char** argv) {
         std::uint64_t gateway{};
         input >> command;
         if (command.empty()) {
-          std::cout << "未输入命令，请输入 list、connect、disconnect、help 或 q。\n";
+          std::cout << "未输入命令，请输入 list、stats、connect、disconnect、help 或 q。\n";
           continue;
         }
 
@@ -121,6 +147,10 @@ int main(int argc, char** argv) {
         }
         if (command == "list") {
           print_gateways(tcp);
+          continue;
+        }
+        if (command == "stats") {
+          print_pipeline_stats(pipeline, database, inference, websocket);
           continue;
         }
 
@@ -160,6 +190,7 @@ int main(int argc, char** argv) {
       while (!interrupted) std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     tcp.stop();
+    inference.stop();
     websocket.stop();
     database.stop();
     iot::log(iot::LogLevel::info, "all services stopped cleanly");

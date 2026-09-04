@@ -1,12 +1,17 @@
 #include "iot/config.hpp"
+#include "iot/concurrency/bounded_queue.hpp"
 #include "iot/protocol/gateway_codec.hpp"
 #include "iot/protocol/sensor_parser.hpp"
 #include "iot/services/inference_engine.hpp"
+#include "iot/services/inference_worker.hpp"
 
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -32,6 +37,7 @@ void test_gateway_command_and_stream_decoder() {
 void test_config() {
   const auto config = iot::AppConfig::load(std::filesystem::path(IOT_TEST_SOURCE_DIR) / "config/config.yaml");
   expect(config.tcp.port == 7628, "TCP config was not loaded");
+  expect(config.queues.database_capacity == 30000, "queue config was not loaded");
   expect(config.profile_for_mac("54:6c:0e:b9:1a:4c").name == "md9930", "MAC normalization failed");
   bool rejected = false;
   try { (void)config.profile_for_mac("00:00:00:00:00:00"); } catch (const std::out_of_range&) { rejected = true; }
@@ -103,6 +109,73 @@ void test_inference_window() {
   sample.accel = iot::Vec3{4, 2, 3}; expect(engine.process(sample) == "walking", "inference class mapping failed");
 }
 
+void test_bounded_queue() {
+  using iot::concurrency::BoundedQueue;
+  using iot::concurrency::OverflowPolicy;
+  using iot::concurrency::PushResult;
+
+  BoundedQueue<int> fifo(2);
+  expect(fifo.try_push(1) == PushResult::pushed, "queue rejected first item");
+  expect(fifo.try_push(2) == PushResult::pushed, "queue rejected second item");
+  expect(fifo.try_push(3) == PushResult::rejected, "full queue did not reject newest item");
+  fifo.close();
+  expect(fifo.wait_pop() == 1, "queue FIFO order is wrong");
+  expect(fifo.wait_pop() == 2, "queue did not drain after close");
+  expect(!fifo.wait_pop(), "closed empty queue did not terminate consumer");
+  expect(fifo.try_push(4) == PushResult::closed, "closed queue accepted an item");
+
+  BoundedQueue<int> realtime(2, OverflowPolicy::drop_oldest);
+  expect(realtime.try_push(1) == PushResult::pushed, "realtime queue rejected first item");
+  expect(realtime.try_push(2) == PushResult::pushed, "realtime queue rejected second item");
+  expect(realtime.try_push(3) == PushResult::dropped_oldest,
+         "realtime queue did not drop its oldest item");
+  realtime.close();
+  expect(realtime.wait_pop() == 2 && realtime.wait_pop() == 3,
+         "realtime queue retained the wrong items");
+  expect(realtime.dropped() == 1, "queue drop counter is wrong");
+}
+
+void test_inference_worker() {
+  iot::InferenceConfig config;
+  config.enabled = true;
+  config.window_size = 3;
+  config.stride = 2;
+
+  std::mutex mutex;
+  std::condition_variable ready;
+  bool predicted = false;
+  std::string predicted_mac;
+  std::string predicted_action;
+  iot::services::InferenceWorker worker(
+      config, std::make_unique<FakeBackend>(),
+      [&](const std::string& mac, const std::string& action) {
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          predicted = true;
+          predicted_mac = mac;
+          predicted_action = action;
+        }
+        ready.notify_one();
+      },
+      8);
+  worker.start();
+
+  iot::SensorSample sample;
+  sample.mac = "AA";
+  for (int value = 1; value <= 4; ++value) {
+    sample.accel = iot::Vec3{static_cast<double>(value), 2, 3};
+    expect(worker.enqueue(sample), "inference worker rejected a sample");
+  }
+
+  std::unique_lock<std::mutex> lock(mutex);
+  const bool completed = ready.wait_for(lock, std::chrono::seconds(1), [&] { return predicted; });
+  lock.unlock();
+  worker.stop();
+  expect(completed, "inference worker did not publish a prediction");
+  expect(predicted_mac == "AA" && predicted_action == "walking",
+         "inference worker published the wrong prediction");
+}
+
 }  // namespace
 
 int main() {
@@ -114,6 +187,8 @@ int main() {
     test_imu948_parser();
     test_md9930_parser();
     test_inference_window();
+    test_bounded_queue();
+    test_inference_worker();
     std::cout << "All protocol tests passed.\n";
     return 0;
   } catch (const std::exception& error) {

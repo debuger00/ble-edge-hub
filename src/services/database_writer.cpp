@@ -134,6 +134,11 @@ bool DatabaseWriter::enqueue(SensorSample sample) {
   return true;
 }
 
+std::size_t DatabaseWriter::queued() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return queue_.size();
+}
+
 void DatabaseWriter::stop() {
   {
     std::lock_guard<std::mutex> lock(mutex_);

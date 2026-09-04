@@ -20,6 +20,9 @@ class DatabaseWriter {
   bool enqueue(SensorSample sample);
   void stop();
 
+  std::size_t queued() const;
+  std::size_t capacity() const noexcept { return queue_capacity_; }
+
  private:
   void run();
   void cleanup_old_databases();
@@ -27,7 +30,7 @@ class DatabaseWriter {
   std::filesystem::path base_dir_;
   int retention_days_;
   std::size_t queue_capacity_;
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::condition_variable ready_;
   std::deque<SensorSample> queue_;
   bool stopping_{false};
@@ -35,4 +38,3 @@ class DatabaseWriter {
 };
 
 }  // namespace iot::services
-

@@ -114,16 +114,22 @@ int create_listener(const EndpointConfig& endpoint) {
 
 }  // namespace
 
-WebSocketServer::WebSocketServer(EndpointConfig endpoint, std::string initial_message)
-    : endpoint_(std::move(endpoint)), initial_message_(std::move(initial_message)) {}
+WebSocketServer::WebSocketServer(EndpointConfig endpoint, std::string initial_message,
+                                 std::size_t queue_capacity)
+    : endpoint_(std::move(endpoint)),
+      initial_message_(std::move(initial_message)),
+      outgoing_(queue_capacity, concurrency::OverflowPolicy::drop_oldest) {}
 WebSocketServer::~WebSocketServer() { stop(); }
 
 void WebSocketServer::start() {
   if (running_.exchange(true)) return;
   try { listen_socket_ = create_listener(endpoint_); }
   catch (...) { running_ = false; throw; }
+  sender_thread_ = std::thread(&WebSocketServer::send_loop, this);
   accept_thread_ = std::thread(&WebSocketServer::accept_loop, this);
-  log(LogLevel::info, "WebSocket listening on " + endpoint_.host + ':' + std::to_string(endpoint_.port));
+  log(LogLevel::info, "WebSocket listening on " + endpoint_.host + ':' +
+                          std::to_string(endpoint_.port) + "; queue capacity=" +
+                          std::to_string(outgoing_.capacity()));
 }
 
 void WebSocketServer::accept_loop() {
@@ -155,6 +161,8 @@ void WebSocketServer::handle_client(int client) {
   const auto response = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
                         base64(digest.data(), digest.size()) + "\r\n\r\n";
   if (!send_all(client, reinterpret_cast<const std::uint8_t*>(response.data()), response.size())) { close(client); return; }
+  timeval send_timeout{1, 0};
+  setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     clients_.push_back(client);
@@ -163,13 +171,32 @@ void WebSocketServer::handle_client(int client) {
   }
 }
 
-void WebSocketServer::broadcast(const std::string& message) {
+bool WebSocketServer::broadcast(std::string message) {
+  if (!running_) return false;
+  const auto result = outgoing_.try_push(std::move(message));
+  if (result == concurrency::PushResult::dropped_oldest) report_drop(outgoing_.dropped());
+  return result == concurrency::PushResult::pushed ||
+         result == concurrency::PushResult::dropped_oldest;
+}
+
+void WebSocketServer::send_loop() {
+  while (auto message = outgoing_.wait_pop()) broadcast_now(*message);
+}
+
+void WebSocketServer::broadcast_now(const std::string& message) {
   const auto frame = text_frame(message);
   std::lock_guard<std::mutex> lock(clients_mutex_);
   clients_.erase(std::remove_if(clients_.begin(), clients_.end(), [&](int client) {
     if (send_all(client, frame.data(), frame.size())) return false;
     close(client); return true;
   }), clients_.end());
+}
+
+void WebSocketServer::report_drop(std::size_t dropped) {
+  if (dropped == 1 || dropped % 1000 == 0) {
+    log(LogLevel::warning, "WebSocket queue overloaded; dropped oldest messages=" +
+                               std::to_string(dropped));
+  }
 }
 
 void WebSocketServer::stop() {
@@ -181,6 +208,8 @@ void WebSocketServer::stop() {
     for (auto& worker : workers_) if (worker.joinable()) worker.join();
     workers_.clear();
   }
+  outgoing_.close();
+  if (sender_thread_.joinable()) sender_thread_.join();
   std::lock_guard<std::mutex> lock(clients_mutex_);
   for (const auto client : clients_) { shutdown(client, SHUT_RDWR); close(client); }
   clients_.clear();

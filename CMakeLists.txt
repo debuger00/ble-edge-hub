@@ -16,8 +16,10 @@ add_library(iot_core
     src/config.cpp
     src/protocol/gateway_codec.cpp
     src/protocol/sensor_parsers.cpp
+    src/services/data_pipeline.cpp
     src/services/database_writer.cpp
     src/services/inference_engine.cpp
+    src/services/inference_worker.cpp
     src/services/websocket_server.cpp
     src/services/tcp_server.cpp)
 target_include_directories(iot_core PUBLIC include)

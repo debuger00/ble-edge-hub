@@ -35,6 +35,12 @@ struct InferenceConfig {
   std::size_t stride{5};
 };
 
+struct QueueConfig {
+  std::size_t database_capacity{30000};
+  std::size_t inference_capacity{5000};
+  std::size_t websocket_capacity{4096};
+};
+
 struct AppConfig {
   EndpointConfig tcp{"0.0.0.0", 7628};
   EndpointConfig websocket{"0.0.0.0", 8765};
@@ -44,6 +50,7 @@ struct AppConfig {
   int retention_days{7};
   std::filesystem::path data_dir{"data"};
   InferenceConfig inference;
+  QueueConfig queues;
   std::unordered_map<std::string, SensorProfile> sensor_types;
   std::vector<DeviceConfig> devices;
 
@@ -56,4 +63,3 @@ struct AppConfig {
 std::string normalize_mac(std::string mac);
 
 }  // namespace iot
-

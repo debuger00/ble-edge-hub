@@ -35,6 +35,12 @@ int parse_int(const std::string& text) {
   return result;
 }
 
+std::size_t parse_positive_size(const std::string& text) {
+  const auto value = parse_int(text);
+  if (value <= 0) throw std::runtime_error("value must be positive: " + text);
+  return static_cast<std::size_t>(value);
+}
+
 bool parse_bool(std::string text) {
   std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
   if (text == "true" || text == "yes" || text == "1") return true;
@@ -93,6 +99,10 @@ AppConfig AppConfig::load(const std::filesystem::path& path) {
         else if (key == "engine_path") cfg.inference.engine_path = value;
         else if (key == "window_size") cfg.inference.window_size = static_cast<std::size_t>(parse_int(value));
         else if (key == "stride") cfg.inference.stride = static_cast<std::size_t>(parse_int(value));
+      } else if (section == "queues") {
+        if (key == "database_capacity") cfg.queues.database_capacity = parse_positive_size(value);
+        else if (key == "inference_capacity") cfg.queues.inference_capacity = parse_positive_size(value);
+        else if (key == "websocket_capacity") cfg.queues.websocket_capacity = parse_positive_size(value);
       } else if (section == "sensor_types") {
         if (indent == 2 && value.empty()) {
           sensor_type = key;
@@ -132,6 +142,8 @@ void AppConfig::validate() const {
   if (battery_interval_seconds <= 0 || reconnect_interval_seconds <= 0 || retention_days < 0)
     throw std::runtime_error("intervals must be positive and retention_days non-negative");
   if (inference.window_size == 0 || inference.stride == 0) throw std::runtime_error("inference window and stride must be positive");
+  if (queues.database_capacity == 0 || queues.inference_capacity == 0 || queues.websocket_capacity == 0)
+    throw std::runtime_error("queue capacities must be positive");
   if (sensor_types.empty()) throw std::runtime_error("sensor_types cannot be empty");
   for (const auto& [name, profile] : sensor_types) {
     if (profile.frequency_hz <= 0 || profile.notify_handle == 0 || profile.cccd_handle == 0 || profile.write_handle == 0)
