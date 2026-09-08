@@ -1,0 +1,75 @@
+% !TEX TS-program = xelatex
+% !TEX encoding = UTF-8 Unicode
+% !Mode:: "TeX:UTF-8"
+
+\documentclass{resume}
+\usepackage{xeCJK}
+\setCJKmainfont[
+  Path = fonts/zh_CN-Adobe/,
+  Extension = .otf,
+  BoldFont = AdobeHeitiStd-Regular,
+  ItalicFont = AdobeKaitiStd-Regular
+]{AdobeSongStd-Light}
+\setCJKsansfont[
+  Path = fonts/zh_CN-Adobe/,
+  Extension = .otf
+]{AdobeHeitiStd-Regular}
+\setCJKmonofont[
+  Path = fonts/zh_CN-Adobe/,
+  Extension = .otf
+]{AdobeSongStd-Light}
+\usepackage{linespacing_fix}
+\usepackage{cite}
+
+\begin{document}
+\pagenumbering{gobble}
+
+\name{汪勇华}
+\contactInfo{13606802442}{wyh3209379906@foxmail.com}{}{}
+
+\section{教育背景}
+\datedsubsection{\textbf{杭州电子科技大学},信息与通信工程,\textit{硕士}}{2024.09--至今}
+\ \textbf{研究方向}: 自监督学习
+\ \textbf{相关课程}: 机器学习，数据挖掘，自适应信号处理，数字图像处理等
+\datedsubsection{\textbf{江西师范大学},通信工程,\textit{学士}}{2020.09--2024.06}
+\ \textbf{综测排名}: 6/27：蓝桥杯单片机省级三等奖，大唐杯移动通信5G大赛省级二等奖，获得两次三等综合素质奖学金
+\ \textbf{相关课程}: 信号系统(87)，数字信号处理(91)，通信原理(87)，电路分析(85)，数字电路技术(88)
+
+\section{实习经历}
+\datedsubsection{\textbf{亚信科技（中国）有限公司},移动智能服务事业部,基础软件运维技术类实习生}{2026.06--2026.09}
+\begin{itemize}
+  \item \textbf{Agent 技术调研：}围绕 Coding Agent 工程化开展学习与实践，通过 API 抓包、源码阅读和对比实验，梳理 Agent Loop、工具调用、上下文注入、Prompt Cache、Subagent、Skills 与 MCP 等机制，并沉淀分析文档及流程图。
+  \item \textbf{数据库场景实践：}参与 MySQL 智能运维原型验证，基于 Python、MySQL 与 MCP 跑通慢查询分析、表结构与执行计划采集、索引建议、人工审批、效果验证及审计记录等流程。
+  \item \textbf{Agent 辅助开发：}在原型迭代中实践“需求澄清—任务规划—分步实现—代码审查—自动测试”的 Agent 辅助开发流程，并结合能力白名单、最小权限和失败补偿约束数据库操作，使用 pytest、Ruff、mypy 与 Docker Compose 完成工程验证。
+\end{itemize}
+
+\section{项目经历}
+\datedsubsection{\textbf{边缘智能传感器实时分析平台}}{2025.07--2025.11}
+\begin{itemize}
+  \item \textbf{项目背景：}面向动物行为监测，构建 BLE 多设备采集、边缘行为识别与公网实时监控平台。
+  \item \textbf{技术栈：}C++17 · POSIX Socket · 多线程 · SQLite · WebSocket · TensorRT/CUDA · Nginx/FRP · CMake
+  \item \textbf{可靠接入：}基于 TCP 长连接实现多网关接入；设计长度校验、XOR 校验与异常帧重同步的流式解码器，处理粘包/半包，适配 IMU948、MD9930 双协议及设备断线重连。
+  \item \textbf{异步流水线：}通过\textbf{有界队列与独立工作线程}解耦采集、存储、推理和推送，隔离磁盘 I/O 与慢客户端；采用 SQLite WAL + 批量事务写入，并对推理、推送队列实施丢旧保新策略，控制积压。
+  \item \textbf{推理加速：}将 ONNX 模型转换为 TensorRT Engine，部署至 Jetson Orin Nano；按设备维护独立滑动窗口，实现五分类行为识别，单次推理由 PyTorch 的 \textbf{16.8 ms} 降至 \textbf{5.1 ms}，耗时降低约 \textbf{70\%}。
+  \item \textbf{实时监控：}实现 WebSocket \textbf{按设备订阅与显示限频}，图表按 15 Hz 合并刷新，保留原始数据用于存储与推理；通过 Nginx + FRP 公网部署，支持 \textbf{20 台设备 $\times$ 25 Hz} 稳定运行 \textbf{48 小时}，端到端 P95 延迟 \textbf{20 ms}。
+\end{itemize}
+
+\datedsubsection{\textbf{基于混合检索的技术知识库检索增强智能体}}{2026.05--2026.07}
+\begin{itemize}
+  \item \textbf{项目背景:} 针对 Obsidian 技术笔记分散、纯向量检索难以兼顾精确术语与跨文档关联的问题，独立设计本地 Grounded RAG 系统，实现 Markdown 知识库问答、可验证引用与证据不足自动拒答。
+  \item \textbf{技术栈}: Python · LangChain · ChromaDB · BGE · BM25 · DeepSeek API · FastAPI · SSE
+  \item \textbf{检索优化:} 构建父子分块与父/子双 Collection，融合 BGE 向量检索和 BM25，并基于 WikiLink及实体关系实现多跳扩展；在 CRUD-RAG 数据集的 1,120 篇中文文档60 条查询上取得\textbf{97.78\% Evidence Recall@10} 和 \textbf{96.67\% 全证据召回率}
+  \item \textbf{工程落地:} 使用 GPU 加速 Embedding；基于 watchdog 监听文档增删改，实现向量索引增量更新与启动差异校验；通过 FastAPI + SSE 实现流式问答、多轮会话及“路径+锚点”引用追溯，并对模型输出进行结构化校验。
+\end{itemize}
+
+\section{技能特长}
+\begin{itemize}[parsep=0.2ex]
+  \item \textbf{编程语言}: 熟悉Python、C++, 能够使用 STL 容器、智能指针及多线程组件进行工程开发；熟悉 CMake 项目构建与依赖配置
+  \item \textbf{网络与并发}: TCP/IP、WebSocket、多线程、高并发流处理；熟悉 Wireshark 抓包分析、路由与策略路由配置及防火墙 ACL 流量控制。
+  \item \textbf{数据库与系统运维}: 熟悉 MySQL、事务、索引和执行计划，能够编写多表连接、聚合及子查询等SQL；熟悉 Linux、Shell、Docker和Git，具备GPU计算环境配置与故障排查经验。
+  \item \textbf{AI 与 Agent}: 熟悉 Claude Code、Codex、MCP、Skill、LangChain、LangGraph、了解 Agent Loop、Tool Calling、状态管理、条件路由、Checkpoint 与 Human-in-the-loop。
+  \item \textbf{AI 工程化}: 熟悉 PyTorch及CNN、Transformer基本原理，具备ONNX/TensorRT模型转换、Jetson边缘部署及模型接入后端数据流的经验；使用过W\&B进行训练监控与实验对比。
+  \item \textbf{语言能力}: 英语CET-6，能够阅读英文技术文档，并通过官方文档及开源社区Issues定位技术问题
+\end{itemize}
+
+\end{document}

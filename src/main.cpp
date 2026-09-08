@@ -43,15 +43,18 @@ void print_gateways(const iot::services::TcpServer& server) {
   for (const auto& gateway : snapshots) {
     std::cout << "网关 " << gateway.id << "  " << gateway.remote_address
               << (gateway.active ? " [在线]" : " [离线]") << '\n';
+    std::cout << "=========================================" << '\n';
     for (const auto& device : gateway.discovered)
       std::cout << "  发现: " << device.mac << " RSSI=" << device.rssi << '\n';
+    std::cout << "=========================================" << '\n';
     for (const auto& device : gateway.connected)
       std::cout << "  连接: " << device.mac << " state=" << static_cast<int>(device.state) << '\n';
   }
 }
 
 void print_command_menu() {
-  std::cout << "\n" << std::string(60, '=') << '\n'
+  std::cout << "\n"
+            << std::string(60, '=') << '\n'
             << "可用命令：\n"
             << "  list                         - 查看网关和设备状态\n"
             << "  stats                        - 查看数据管道和队列状态\n"
@@ -64,9 +67,7 @@ void print_command_menu() {
             << std::string(60, '=') << '\n';
 }
 
-void print_command_prompt() {
-  std::cout << "请输入命令（输入 help 查看帮助）> " << std::flush;
-}
+void print_command_prompt() { std::cout << "请输入命令（输入 help 查看帮助）> " << std::flush; }
 
 void print_pipeline_stats(const iot::services::DataPipeline& pipeline,
                           const iot::services::DatabaseWriter& database,
@@ -76,11 +77,10 @@ void print_pipeline_stats(const iot::services::DataPipeline& pipeline,
             << "  数据库队列   " << database.queued() << '/' << database.capacity()
             << "，拒绝=" << pipeline.database_dropped() << '\n'
             << "  推理队列     " << inference.queued() << '/' << inference.capacity()
-            << "，丢弃最旧=" << inference.dropped()
-            << "，拒绝=" << pipeline.inference_rejected() << '\n'
-            << "  WebSocket队列 " << websocket.queued_messages() << '/'
-            << websocket.queue_capacity() << "，丢弃最旧=" << websocket.dropped_messages()
-            << "，拒绝=" << pipeline.websocket_rejected() << '\n';
+            << "，丢弃最旧=" << inference.dropped() << "，拒绝=" << pipeline.inference_rejected() << '\n'
+            << "  WebSocket队列 " << websocket.queued_messages() << '/' << websocket.queue_capacity()
+            << "，丢弃最旧=" << websocket.dropped_messages() << "，拒绝=" << pipeline.websocket_rejected()
+            << '\n';
 }
 }  // namespace
 
@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
     iot::services::InferenceWorker inference(
         config.inference,
         [&websocket](const std::string& mac, const std::string& action) {
-          websocket.broadcast(iot::prediction_json(mac, action));
+          websocket.broadcast(iot::prediction_json(mac, action), mac);
         },
         config.queues.inference_capacity);
     iot::services::DataPipeline pipeline(database, inference, websocket);
@@ -169,12 +169,11 @@ int main(int argc, char** argv) {
             continue;
           }
 
-          const bool success = command == "connect"
-                                   ? tcp.connect_device(gateway, mac)
-                                   : tcp.disconnect_device(gateway, mac);
+          const bool success =
+              command == "connect" ? tcp.connect_device(gateway, mac) : tcp.disconnect_device(gateway, mac);
           if (success) {
-            std::cout << (command == "connect" ? "连接" : "断开")
-                      << "命令已发送：网关 ID=" << gateway << "，设备 MAC=" << mac << '\n';
+            std::cout << (command == "connect" ? "连接" : "断开") << "命令已发送：网关 ID=" << gateway
+                      << "，设备 MAC=" << mac << '\n';
           } else {
             std::cerr << (command == "connect" ? "连接" : "断开")
                       << "命令发送失败。请确认网关 ID、设备 MAC 已配置，并使用 list 查看状态。\n";
@@ -182,8 +181,7 @@ int main(int argc, char** argv) {
           continue;
         }
 
-        std::cerr << "未知命令：" << command << '\n'
-                  << "请输入 help 查看可用命令。\n";
+        std::cerr << "未知命令：" << command << '\n' << "请输入 help 查看可用命令。\n";
       }
     } else {
       iot::log(iot::LogLevel::info, "running without interactive CLI; send SIGINT or SIGTERM to stop");

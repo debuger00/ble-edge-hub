@@ -2,6 +2,7 @@
 #include "iot/concurrency/bounded_queue.hpp"
 #include "iot/protocol/gateway_codec.hpp"
 #include "iot/protocol/sensor_parser.hpp"
+#include "iot/protocol/websocket.hpp"
 #include "iot/services/inference_engine.hpp"
 #include "iot/services/inference_worker.hpp"
 
@@ -42,6 +43,38 @@ void test_config() {
   bool rejected = false;
   try { (void)config.profile_for_mac("00:00:00:00:00:00"); } catch (const std::out_of_range&) { rejected = true; }
   expect(rejected, "unknown MAC unexpectedly got a fallback profile");
+}
+
+void test_websocket_rejection() {
+  for (const auto* json : {
+      R"({"type":"subscribe","mac":"AA:BB:CC:DD:EE:FF","sample_hz":-1})",
+      R"({"type":"subscribe","mac":"AA:BB:CC:DD:EE:FF","sample_hz":1.5})",
+      R"({"type":"subscribe","mac":"AA:BB:CC:DD:EE:FF","sample_hz":"10"})",
+      R"({"type":"subscribe","mac":"","mac":"AA:BB:CC:DD:EE:FF"})",
+      R"({"type":"subscribe","mac":"",})",
+      R"({"type":"subscribe","mac":"", "unknown":0})"}) {
+    bool rejected = false;
+    try { (void)iot::protocol::parse_subscription(json); }
+    catch (const std::exception&) { rejected = true; }
+    expect(rejected, "invalid subscription accepted");
+  }
+  const auto valid = iot::protocol::parse_subscription(
+      " { \"mac\" : \"aa:bb:cc:dd:ee:ff\", \"type\" : \"subscribe\" } ");
+  expect(valid.mac == "AA:BB:CC:DD:EE:FF" && valid.sample_hz == 0,
+         "subscription defaults or normalization failed");
+  for (const auto& bytes : std::vector<iot::Bytes>{
+      {0x81, 0x00},                     // Unmasked client frame.
+      {0x09, 0x80},                     // Fragmented ping.
+      {0x81, 0xfe, 0x10, 0x01},         // Oversized command.
+      {0x80, 0x80, 0, 0, 0, 0},         // Continuation without start.
+      {0xc1, 0x80},                     // Unsupported extension bits.
+      {0x81, 0xfe, 0, 1}}) {            // Noncanonical extended length.
+    iot::protocol::WebSocketDecoder decoder;
+    bool rejected = false;
+    try { decoder.append(bytes.data(), bytes.size(), [](const auto&) {}); }
+    catch (const std::exception&) { rejected = true; }
+    expect(rejected, "invalid WebSocket frame accepted");
+  }
 }
 
 void test_decoder_resynchronization() {
@@ -181,6 +214,7 @@ void test_inference_worker() {
 int main() {
   try {
     test_config();
+    test_websocket_rejection();
     test_gateway_command_and_stream_decoder();
     test_decoder_resynchronization();
     test_scan_frame();

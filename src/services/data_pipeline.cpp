@@ -22,7 +22,7 @@ void DataPipeline::publish(SensorSample sample) {
   }
 
   const auto json = sample_json(sample);
-  if (!websocket_.broadcast(json)) {
+  if (!websocket_.broadcast(json, sample.mac, true, epoch_millis(sample.received_at))) {
     const auto count = websocket_rejected_.fetch_add(1, std::memory_order_relaxed) + 1;
     report_drop("websocket", count);
   }

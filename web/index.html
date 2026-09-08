@@ -26,12 +26,23 @@
             <div class="box">
                 <h2 class="title is-4">设备选择与状态</h2>
                 <p class="mb-3">当前显示设备: <strong id="current-device-mac">无</strong></p>
+                <div class="field is-grouped is-align-items-center">
+                    <label for="display-rate" class="mr-2">波形显示</label>
+                    <div class="select is-small">
+                        <select id="display-rate">
+                            <option value="0">完整采样（25 Hz）</option>
+                            <option value="10">省流显示（10 Hz）</option>
+                        </select>
+                    </div>
+                    <span class="help ml-3">图表每秒刷新 15 次；省流显示不影响原始数据保存。</span>
+                </div>
                 <div id="device-selector" class="buttons are-small">
                 </div>
             </div>
             <p id="status" class="subtitle is-warning">正在连接服务器...</p>
+            <p id="waveform-status" class="help mb-4" role="status">等待设备列表与采样数据。</p>
 
-            <h1 class="title">实时角速度数据 (Gyroscope)</h1>
+            <h1 class="title">实时加速度数据 (Acceleration)</h1>
             <div class="box">
                 <canvas id="accelChart" width="800" height="300"></canvas>
             </div>
@@ -48,7 +59,7 @@
         </div>
     </section>
 
-    <script src="app.js" defer></script>
+    <script src="app.js?v=20260905-subscription-2" defer></script>
 </body>
 
 </html>

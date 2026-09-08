@@ -4,11 +4,18 @@
 // 1. 常量定义与状态管理 (State Management)
 // =======================
 
-const MAX_DATA_POINTS = 750;              // accel 点数窗口
+const MAX_DATA_POINTS = 750;
+const SAMPLE_WINDOW_MS = 30000;
+const RENDER_INTERVAL_MS = 1000 / 15;
+const dirtyCharts = new Set();
+let displaySampleHz = 0; // 0: retain every received sample; 10: display-only downsampling.
 const ACTION_WINDOW_MS = 20000;           // action 时间窗口 (20秒)
 
 const discoveredDevices = new Set();
 let currentDeviceMac = null;
+let selectedSampleCount = 0;
+let selectedLastSampleAt = 0;
+let confirmedSubscriptionMac = null;
 
 const OFFLINE_THRESHOLD_MS = 5000; // 判定离线的阈值：5000ms未收到数据
 const deviceLastSeen = new Map();  // 记录设备最后活跃的绝对时间 (Space Complexity: O(N))
@@ -18,6 +25,8 @@ const deviceBatteryMap = new Map(); // 缓存电量与时间戳数据 (Space Com
 const statusElement = document.getElementById('status');
 const deviceSelectorElement = document.getElementById('device-selector');
 const currentDeviceMacElement = document.getElementById('current-device-mac');
+const displayRateElement = document.getElementById('display-rate');
+const waveformStatusElement = document.getElementById('waveform-status');
 
 // =======================
 // 2. 图表初始化 (Chart.js Initialization)
@@ -177,14 +186,8 @@ function renderDeviceSelector() {
                 currentDeviceMac = mac;
                 currentDeviceMacElement.textContent = mac;
 
-                // Flush 图表缓存数据 (Time Complexity: O(1) 引用重置)
-                chart.data.datasets.forEach(dataset => dataset.data = []);
-                sensorTimeChart.data.datasets.forEach(dataset => dataset.data = []);
-                actionChart.data.datasets[0].data = [];
-
-                chart.update();
-                sensorTimeChart.update();
-                actionChart.update();
+                resetCharts();
+                subscribeCurrentDevice();
 
                 renderDeviceSelector();
                 updateDeviceStatusUI();
@@ -194,7 +197,59 @@ function renderDeviceSelector() {
     });
 }
 
-currentDeviceMacElement.textContent = currentDeviceMac;
+function resetCharts() {
+    selectedSampleCount = 0;
+    selectedLastSampleAt = 0;
+    confirmedSubscriptionMac = null;
+    [chart, sensorTimeChart, actionChart].forEach(item => {
+        item.data.datasets.forEach(dataset => { dataset.data = []; });
+        delete item.options.scales.x.min;
+        delete item.options.scales.x.max;
+        dirtyCharts.add(item);
+    });
+}
+
+// Network handlers only update bounded datasets. Rendering is independent of
+// input frequency, and hidden tabs keep at most MAX_DATA_POINTS per dataset.
+setInterval(() => {
+    if (document.hidden) return;
+    dirtyCharts.forEach(item => item.update('none'));
+    dirtyCharts.clear();
+}, RENDER_INTERVAL_MS);
+
+function subscribeCurrentDevice() {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+            type: 'subscribe', mac: currentDeviceMac || '', sample_hz: displaySampleHz
+        }));
+    }
+}
+
+// A cached older HTML page may not contain the new optional display control.
+// It must still initialize the socket and subscribe successfully.
+if (displayRateElement) {
+    displayRateElement.onchange = () => {
+        displaySampleHz = Number(displayRateElement.value) === 10 ? 10 : 0;
+        subscribeCurrentDevice();
+    };
+}
+
+function updateWaveformStatus() {
+    if (!waveformStatusElement) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        waveformStatusElement.textContent = '实时连接未建立，暂时无法接收波形。';
+    } else if (!currentDeviceMac) {
+        waveformStatusElement.textContent = '没有可订阅的设备，请检查后端设备配置。';
+    } else if (selectedLastSampleAt && Date.now() - selectedLastSampleAt <= OFFLINE_THRESHOLD_MS) {
+        waveformStatusElement.textContent = `正在接收 ${currentDeviceMac}：本次已收到 ${selectedSampleCount} 个波形采样。`;
+    } else if (confirmedSubscriptionMac === currentDeviceMac) {
+        waveformStatusElement.textContent = `已订阅 ${currentDeviceMac}，等待采样；可选择 Online 设备或检查传感器连接。`;
+    } else {
+        waveformStatusElement.textContent = `等待 ${currentDeviceMac} 的订阅确认；若持续无数据，请确认后端已更新。`;
+    }
+}
+
+currentDeviceMacElement.textContent = currentDeviceMac || "--";
 renderDeviceSelector();
 
 /**
@@ -225,7 +280,10 @@ function updateDeviceStatusUI() {
     });
 }
 
-setInterval(updateDeviceStatusUI, 1000);
+setInterval(() => {
+    updateDeviceStatusUI();
+    updateWaveformStatus();
+}, 1000);
 
 // =======================
 // 4. WebSocket 数据管道 (WebSocket Data Pipeline)
@@ -265,23 +323,37 @@ function connectWebSocket() {
             // 设备列表初始化消息
             if (message.type === 'device_list') {
                 discoveredDevices.clear();
-                if (message.devices && message.devices.length > 0) {
-                    message.devices.forEach(d => discoveredDevices.add(d.mac));
-                    if (!currentDeviceMac || !discoveredDevices.has(currentDeviceMac)) {
-                        currentDeviceMac = message.devices[0].mac;
-                        if (currentDeviceMacElement) {
-                            currentDeviceMacElement.textContent = currentDeviceMac;
-                        }
-                    }
+                (message.devices || []).forEach(d => discoveredDevices.add(d.mac));
+                if (!discoveredDevices.has(currentDeviceMac)) {
+                    currentDeviceMac = discoveredDevices.values().next().value || null;
                 }
+                currentDeviceMacElement.textContent = currentDeviceMac || '--';
+                resetCharts();
                 renderDeviceSelector();
+                subscribeCurrentDevice(); // Also restores the selection after reconnect.
+                return;
+            }
+            if (message.type === 'subscribed') {
+                confirmedSubscriptionMac = message.mac;
+                updateWaveformStatus();
+                return;
+            }
+            if (message.type === 'error') {
+                statusElement.textContent = message.message || '订阅失败';
+                statusElement.className = 'subtitle is-warning';
                 return;
             }
 
             const mac = message.mac;
             const now = message.timestamp;
 
-            if (mac) {
+            if (message.type === 'device_activity') {
+                if (mac && Number.isFinite(message.age_ms)) {
+                    deviceLastSeen.set(mac, Date.now() - Math.max(0, message.age_ms));
+                }
+                return;
+            }
+            if (mac && message.type === 'sensor_data') {
                 deviceLastSeen.set(mac, Date.now());
             }
 
@@ -312,6 +384,8 @@ function connectWebSocket() {
                 if (!currentDeviceMac) {
                     currentDeviceMac = mac;
                     currentDeviceMacElement.textContent = mac;
+                    resetCharts();
+                    subscribeCurrentDevice();
                     renderDeviceSelector();
                 }
             }
@@ -321,6 +395,8 @@ function connectWebSocket() {
 
             // 角速度与加速度渲染逻辑
             if (message.data && message.data.accel) {
+                selectedSampleCount++;
+                selectedLastSampleAt = Date.now();
                 const accel = message.data.accel;
                 const dx = chart.data.datasets[0].data;
                 const dy = chart.data.datasets[1].data;
@@ -334,10 +410,21 @@ function connectWebSocket() {
                 if (dy.length > MAX_DATA_POINTS) dy.shift();
                 if (dz.length > MAX_DATA_POINTS) dz.shift();
 
-                chart.update('none');
+                chart.data.datasets.forEach(dataset => {
+                    while (dataset.data.length && dataset.data[0].x < now - SAMPLE_WINDOW_MS) {
+                        dataset.data.shift();
+                    }
+                });
+                chart.options.scales.x.min = now - SAMPLE_WINDOW_MS;
+                chart.options.scales.x.max = now;
+                dirtyCharts.add(chart);
 
                 const sensorTime = message.sensor_uptime;
-                if (sensorTime) {
+                if (Number.isFinite(sensorTime)) {
+                    const previous = sensorTimeChart.data.datasets[0].data;
+                    if (previous.length && sensorTime < previous[previous.length - 1].x) {
+                        sensorTimeChart.data.datasets.forEach(dataset => { dataset.data = []; });
+                    }
                     const d1 = sensorTimeChart.data.datasets[0].data;
                     const d2 = sensorTimeChart.data.datasets[1].data;
                     const d3 = sensorTimeChart.data.datasets[2].data;
@@ -350,7 +437,14 @@ function connectWebSocket() {
                     if (d2.length > MAX_DATA_POINTS) d2.shift();
                     if (d3.length > MAX_DATA_POINTS) d3.shift();
 
-                    sensorTimeChart.update('none');
+                    sensorTimeChart.data.datasets.forEach(dataset => {
+                        while (dataset.data.length && dataset.data[0].x < sensorTime - SAMPLE_WINDOW_MS) {
+                            dataset.data.shift();
+                        }
+                    });
+                    sensorTimeChart.options.scales.x.min = Math.max(0, sensorTime - SAMPLE_WINDOW_MS);
+                    sensorTimeChart.options.scales.x.max = Math.max(1, sensorTime);
+                    dirtyCharts.add(sensorTimeChart);
                 }
             }
 
@@ -378,7 +472,8 @@ function connectWebSocket() {
                     data.shift();
                 }
 
-                actionChart.update('none');
+                if (data.length > MAX_DATA_POINTS) data.splice(0, data.length - MAX_DATA_POINTS);
+                dirtyCharts.add(actionChart);
             }
 
         } catch (e) {
@@ -387,6 +482,10 @@ function connectWebSocket() {
     };
 
     socket.onclose = (event) => {
+        deviceLastSeen.clear();
+        confirmedSubscriptionMac = null;
+        updateDeviceStatusUI();
+        updateWaveformStatus();
         statusElement.textContent = `与服务器断开连接，将在 ${reconnectInterval / 1000} 秒后尝试重连...`;
         statusElement.className = 'subtitle is-danger';
 

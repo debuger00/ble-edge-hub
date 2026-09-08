@@ -1,9 +1,12 @@
 #include "iot/services/websocket_server.hpp"
 
 #include "iot/log.hpp"
+#include "iot/json.hpp"
+#include "iot/protocol/websocket.hpp"
 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -13,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace iot::services {
 namespace {
@@ -114,6 +118,31 @@ int create_listener(const EndpointConfig& endpoint) {
 
 }  // namespace
 
+struct WebSocketServer::Client {
+  explicit Client(int fd) : socket(fd) {}
+  ~Client() { close(socket); }
+  const int socket;
+  std::atomic<bool> active{true};
+  // Serializes subscription changes with complete frame writes.
+  std::mutex mutex;
+  protocol::WebSocketSubscription subscription;
+  double next_sample_ms{};
+  std::int64_t last_sample_ms{};
+
+  bool send(const std::string& payload, std::uint8_t opcode = 1) {
+    if (!active) return false;
+    auto frame = text_frame(payload);
+    frame[0] = 0x80 | opcode;
+    if (send_all(socket, frame.data(), frame.size())) return true;
+    disconnect();
+    return false;
+  }
+  void disconnect() {
+    active = false;
+    shutdown(socket, SHUT_RDWR);
+  }
+};
+
 WebSocketServer::WebSocketServer(EndpointConfig endpoint, std::string initial_message,
                                  std::size_t queue_capacity)
     : endpoint_(std::move(endpoint)),
@@ -125,6 +154,15 @@ void WebSocketServer::start() {
   if (running_.exchange(true)) return;
   try { listen_socket_ = create_listener(endpoint_); }
   catch (...) { running_ = false; throw; }
+  if (endpoint_.port == 0) {
+    sockaddr_storage address{};
+    socklen_t length = sizeof(address);
+    if (getsockname(listen_socket_, reinterpret_cast<sockaddr*>(&address), &length) == 0) {
+      endpoint_.port = address.ss_family == AF_INET
+                           ? ntohs(reinterpret_cast<sockaddr_in*>(&address)->sin_port)
+                           : ntohs(reinterpret_cast<sockaddr_in6*>(&address)->sin6_port);
+    }
+  }
   sender_thread_ = std::thread(&WebSocketServer::send_loop, this);
   accept_thread_ = std::thread(&WebSocketServer::accept_loop, this);
   log(LogLevel::info, "WebSocket listening on " + endpoint_.host + ':' +
@@ -137,59 +175,141 @@ void WebSocketServer::accept_loop() {
     const int client = accept(listen_socket_, nullptr, nullptr);
     if (client < 0) { if (errno == EINTR) continue; if (running_) log(LogLevel::error, "WebSocket accept failed"); break; }
     std::lock_guard<std::mutex> lock(workers_mutex_);
-    workers_.emplace_back(&WebSocketServer::handle_client, this, client);
+    workers_.erase(std::remove_if(workers_.begin(), workers_.end(), [](auto& worker) {
+      if (worker.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+      worker.get();
+      return true;
+    }), workers_.end());
+    workers_.push_back(std::async(std::launch::async, &WebSocketServer::handle_client, this, client));
   }
 }
 
-void WebSocketServer::handle_client(int client) {
-  timeval timeout{5, 0}; setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-  std::string request;
-  std::array<char, 2048> buffer{};
-  while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384) {
-    const auto received = recv(client, buffer.data(), buffer.size(), 0);
-    if (received <= 0) { close(client); return; }
-    request.append(buffer.data(), static_cast<std::size_t>(received));
-  }
-  const std::string header = "Sec-WebSocket-Key:";
-  auto key_pos = request.find(header);
-  if (key_pos == std::string::npos) { close(client); return; }
-  key_pos += header.size();
-  while (key_pos < request.size() && request[key_pos] == ' ') ++key_pos;
-  const auto key_end = request.find("\r\n", key_pos);
-  if (key_end == std::string::npos) { close(client); return; }
-  const auto digest = sha1(request.substr(key_pos, key_end - key_pos) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-  const auto response = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
-                        base64(digest.data(), digest.size()) + "\r\n\r\n";
-  if (!send_all(client, reinterpret_cast<const std::uint8_t*>(response.data()), response.size())) { close(client); return; }
+void WebSocketServer::handle_client(int socket) {
+  auto client = std::make_shared<Client>(socket);
+  timeval timeout{5, 0}; setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   timeval send_timeout{1, 0};
-  setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
-  {
-    std::lock_guard<std::mutex> lock(clients_mutex_);
-    clients_.push_back(client);
-    const auto frame = text_frame(initial_message_);
-    if (!send_all(client, frame.data(), frame.size())) { clients_.pop_back(); close(client); }
+  setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+  try {
+    std::string request;
+    std::array<char, 2048> buffer{};
+    while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384 && running_) {
+      const auto received = recv(socket, buffer.data(), buffer.size(), 0);
+      if (received <= 0) return;
+      request.append(buffer.data(), static_cast<std::size_t>(received));
+    }
+    const auto header_end = request.find("\r\n\r\n");
+    const std::string header = "Sec-WebSocket-Key:";
+    auto key_pos = request.find(header);
+    if (header_end == std::string::npos || key_pos == std::string::npos || key_pos > header_end) return;
+    key_pos += header.size();
+    while (key_pos < request.size() && request[key_pos] == ' ') ++key_pos;
+    const auto key_end = request.find("\r\n", key_pos);
+    if (key_end == std::string::npos) return;
+    const auto digest = sha1(request.substr(key_pos, key_end - key_pos) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    const auto response = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+                          base64(digest.data(), digest.size()) + "\r\n\r\n";
+    if (!send_all(socket, reinterpret_cast<const std::uint8_t*>(response.data()), response.size())) return;
+    if (!client->send(initial_message_)) return;
+    {
+      std::lock_guard<std::mutex> lock(clients_mutex_);
+      clients_.push_back(client);
+    }
+    protocol::WebSocketDecoder decoder;
+    auto handle = [&](const protocol::WebSocketMessage& message) {
+      std::lock_guard<std::mutex> lock(client->mutex);
+      if (!client->active) return;
+      if (message.opcode == 8) {
+        client->send(message.payload, 8);
+        client->disconnect();
+      } else if (message.opcode == 9) {
+        client->send(message.payload, 10);
+      } else if (message.opcode == 1) {
+        try {
+          client->subscription = protocol::parse_subscription(message.payload);
+          client->next_sample_ms = 0;
+          client->last_sample_ms = 0;
+          client->send("{\"type\":\"subscribed\",\"mac\":\"" +
+                       json_escape(client->subscription.mac) + "\",\"sample_hz\":" +
+                       std::to_string(client->subscription.sample_hz) + "}");
+        } catch (const std::exception&) {
+          client->send("{\"type\":\"error\",\"message\":\"Invalid subscribe command\"}");
+        }
+      }
+    };
+    const auto pending = request.substr(header_end + 4);
+    decoder.append(reinterpret_cast<const std::uint8_t*>(pending.data()), pending.size(), handle);
+    while (running_ && client->active) {
+      pollfd descriptor{socket, POLLIN, 0};
+      const int status = poll(&descriptor, 1, 200);
+      if (status < 0 && errno == EINTR) continue;
+      if (status < 0 || descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+      if (!(descriptor.revents & POLLIN)) continue;
+      const auto received = recv(socket, buffer.data(), buffer.size(), 0);
+      if (received <= 0) break;
+      decoder.append(reinterpret_cast<const std::uint8_t*>(buffer.data()),
+                     static_cast<std::size_t>(received), handle);
+    }
+  } catch (const std::exception& error) {
+    log(LogLevel::warning, std::string("WebSocket client closed: ") + error.what());
   }
+  client->disconnect();
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  clients_.erase(std::remove(clients_.begin(), clients_.end(), client), clients_.end());
 }
 
-bool WebSocketServer::broadcast(std::string message) {
+bool WebSocketServer::broadcast(std::string message, std::string mac, bool sample,
+                                std::int64_t timestamp_ms) {
   if (!running_) return false;
-  const auto result = outgoing_.try_push(std::move(message));
+  const auto result = outgoing_.try_push({std::move(message), normalize_mac(std::move(mac)), sample,
+                                         timestamp_ms});
   if (result == concurrency::PushResult::dropped_oldest) report_drop(outgoing_.dropped());
   return result == concurrency::PushResult::pushed ||
          result == concurrency::PushResult::dropped_oldest;
 }
 
 void WebSocketServer::send_loop() {
-  while (auto message = outgoing_.wait_pop()) broadcast_now(*message);
+  // A low-rate activity channel keeps unselected devices visible without
+  // broadcasting their full sensor streams. Silence expires in the browser.
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> activity_sent;
+  while (auto message = outgoing_.wait_pop()) {
+    if (!running_) break;
+    if (message->sample) {
+      const auto now = std::chrono::steady_clock::now();
+      auto found = activity_sent.find(message->mac);
+      if (found == activity_sent.end() || now - found->second >= std::chrono::seconds(1)) {
+        activity_sent[message->mac] = now;
+        const auto age = std::max<std::int64_t>(0, epoch_millis() - message->timestamp_ms);
+        broadcast_now({"{\"type\":\"device_activity\",\"mac\":\"" + json_escape(message->mac) +
+                       "\",\"age_ms\":" + std::to_string(age) + "}", {}, false, 0});
+      }
+    }
+    broadcast_now(*message);
+  }
 }
 
-void WebSocketServer::broadcast_now(const std::string& message) {
-  const auto frame = text_frame(message);
-  std::lock_guard<std::mutex> lock(clients_mutex_);
-  clients_.erase(std::remove_if(clients_.begin(), clients_.end(), [&](int client) {
-    if (send_all(client, frame.data(), frame.size())) return false;
-    close(client); return true;
-  }), clients_.end());
+void WebSocketServer::broadcast_now(const OutgoingMessage& message) {
+  std::vector<std::shared_ptr<Client>> clients;
+  {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    clients = clients_;
+  }
+  for (const auto& client : clients) {
+    std::lock_guard<std::mutex> lock(client->mutex);
+    if (!client->active) continue;
+    if (!message.mac.empty() && client->subscription.mac != message.mac) continue;
+    if (message.sample && client->subscription.sample_hz) {
+      const double now = static_cast<double>(message.timestamp_ms);
+      // Timestamp regression (clock correction) restarts the display limiter.
+      if (message.timestamp_ms < client->last_sample_ms) client->next_sample_ms = 0;
+      client->last_sample_ms = message.timestamp_ms;
+      if (now < client->next_sample_ms) continue;
+      const double interval = 1000.0 / client->subscription.sample_hz;
+      if (client->next_sample_ms == 0 || now - client->next_sample_ms >= interval)
+        client->next_sample_ms = now;
+      client->next_sample_ms += interval;
+    }
+    client->send(message.payload);
+  }
 }
 
 void WebSocketServer::report_drop(std::size_t dropped) {
@@ -204,14 +324,17 @@ void WebSocketServer::stop() {
   if (listen_socket_ >= 0) { shutdown(listen_socket_, SHUT_RDWR); close(listen_socket_); listen_socket_ = -1; }
   if (accept_thread_.joinable()) accept_thread_.join();
   {
-    std::lock_guard<std::mutex> lock(workers_mutex_);
-    for (auto& worker : workers_) if (worker.joinable()) worker.join();
-    workers_.clear();
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    for (const auto& client : clients_) client->disconnect();
   }
   outgoing_.close();
   if (sender_thread_.joinable()) sender_thread_.join();
+  {
+    std::lock_guard<std::mutex> lock(workers_mutex_);
+    for (auto& worker : workers_) worker.get();
+    workers_.clear();
+  }
   std::lock_guard<std::mutex> lock(clients_mutex_);
-  for (const auto client : clients_) { shutdown(client, SHUT_RDWR); close(client); }
   clients_.clear();
 }
 

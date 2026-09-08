@@ -1,10 +1,10 @@
 # 🌐 BLE IoT Edge Computing Platform
 
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
-![CMake](https://img.shields.io/badge/CMake-3.13%2B-064F8C?logo=cmake&logoColor=white)
+![CMake](https://img.shields.io/badge/CMake-3.17%2B-064F8C?logo=cmake&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-Time--Series-003B57?logo=sqlite&logoColor=white)
 ![WebSocket](https://img.shields.io/badge/WebSocket-Real--Time-0A7BBB?logo=websocket&logoColor=white)
-![TensorRT](https://img.shields.io/badge/TensorRT-Optional-76B900?logo=nvidia&logoColor=white)
+![TensorRT](https://img.shields.io/badge/TensorRT-Default-76B900?logo=nvidia&logoColor=white)
 
 一个面向工业物联网场景的蓝牙传感器边缘计算平台。系统接收 BLE 网关转发的传感器数据，完成网络通信、二进制协议解析、设备管理、数据存储、实时推送和行为识别，适合部署在 Linux 边缘设备或 NVIDIA Jetson 平台上。
 
@@ -70,7 +70,7 @@
 - 支持配置窗口长度 `window_size` 和推理步长 `stride`；
 - 使用有界队列和独立工作线程，TensorRT 不阻塞 TCP 接收；
 - 当前行为类别包括 `standing`、`running`、`grazing`、`trotting` 和 `walking`；
-- TensorRT 是可选组件，没有 CUDA/TensorRT 的设备仍可编译采集、存储和测试功能。
+- TensorRT 默认启用；没有 CUDA/TensorRT 的设备仍可通过 `-DIOT_ENABLE_TENSORRT=OFF` 编译采集、存储和测试功能。
 
 ### 💾 异步时序数据存储
 
@@ -83,7 +83,7 @@
 
 ### 📡 实时 WebSocket 推送
 
-服务端通过有界发送队列和独立线程向浏览器广播传感器三轴数据、设备电池电量、行为识别结果和初始设备列表。慢客户端不会直接阻塞 TCP 接收线程；队列过载时丢弃最旧的实时消息。前端使用 HTML、JavaScript 和 Chart.js 展示实时波形、设备在线状态、电池信息和行为识别结果。
+服务端通过有界发送队列和独立线程，按浏览器订阅的设备推送传感器三轴数据和行为识别结果；设备列表、电池信息和低频活动消息供所有客户端查看。前端将数据接收与图表刷新分开，以每秒 15 次的频率统一刷新，并提供完整采样和 10 Hz 省流显示。降采样只影响该浏览器的采样消息，原始数据库写入和模型推理不受影响。慢客户端不会直接阻塞 TCP 接收线程；队列过载时丢弃最旧的实时消息。
 
 ## 📊 支持的传感器
 
@@ -149,7 +149,7 @@
 ### 普通开发环境
 
 - Linux/POSIX 环境；
-- CMake `3.13+`；
+- CMake `3.17+`；
 - 支持 C++17 的编译器，例如 GCC 或 Clang；
 - pthread；
 - SQLite 运行库：`libsqlite3.so.0` 或 `libsqlite3.so`；
@@ -164,9 +164,9 @@ sudo apt install build-essential cmake libsqlite3-0 python3
 
 SQLite 使用运行时动态加载，因此只运行程序时需要 SQLite runtime，不要求安装 SQLite 开发头文件。
 
-### TensorRT 环境（可选）
+### TensorRT 环境（默认启用）
 
-如果需要启用行为识别，还需要与目标设备匹配的 CUDA、TensorRT runtime、TensorRT 开发头文件，以及匹配目标 GPU 和 TensorRT 版本的 `convtran.engine`。
+默认构建需要与目标设备匹配的 CUDA Toolkit、TensorRT runtime、TensorRT 开发头文件，以及匹配目标 GPU 和 TensorRT 版本的 `convtran.engine`。如果只需要网络、存储和协议测试功能，可以在配置时传入 `-DIOT_ENABLE_TENSORRT=OFF`。
 
 ## 🚀 快速开始
 
@@ -215,6 +215,16 @@ cmake -S . -B build \
 cmake --build build -j2
 ```
 
+TensorRT 默认启用，上述命令会自动查找 CUDA Toolkit、TensorRT 头文件和 `libnvinfer`，无需额外传入 `-DIOT_ENABLE_TENSORRT=ON`。没有安装 TensorRT 的开发机可以使用：
+
+```bash
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DIOT_ENABLE_TENSORRT=OFF
+
+cmake --build build -j2
+```
+
 编译产物：
 
 ```text
@@ -231,7 +241,7 @@ build/compile_commands.json
 ctest --test-dir build --output-on-failure
 ```
 
-测试不需要真实网关和传感器，主要覆盖协议解析和滑动窗口推理逻辑。
+测试不需要真实网关和传感器。除协议、滑动窗口和队列测试外，检测到 Python 3 时启用本地 WebSocket 集成测试，检测到 Node.js 时启用前端事件处理测试。集成测试需要允许绑定本地回环端口，并验证订阅隔离、限频及原始样本落库。
 
 ### 5. 启动边缘服务
 
@@ -415,7 +425,7 @@ queues:
 
 ## 🧠 TensorRT 行为识别
 
-普通 Linux 开发机可以不启用 TensorRT。需要使用 GPU 推理时，先安装与目标 Jetson/GPU、CUDA 和 TensorRT 版本匹配的开发包，并将模型文件放入：
+默认构建会启用 TensorRT。请先安装与目标 Jetson/GPU、CUDA 和 TensorRT 版本匹配的开发包，并将模型文件放入：
 
 ```text
 model/convtran.engine
@@ -426,7 +436,6 @@ model/convtran.engine
 ```bash
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
-  -DIOT_ENABLE_TENSORRT=ON \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
 cmake --build build -j2
@@ -441,11 +450,37 @@ ctest --test-dir build --output-on-failure
 standing / running / grazing / trotting / walking
 ```
 
-如果程序没有使用 `-DIOT_ENABLE_TENSORRT=ON` 编译，即使配置中的 `inference.enabled: true`，程序也会记录提示并继续提供网络接入、数据存储和 WebSocket 服务。
+如果程序使用 `-DIOT_ENABLE_TENSORRT=OFF` 编译，即使配置中的 `inference.enabled: true`，程序也会记录提示并继续提供网络接入、数据存储和 WebSocket 服务。
 
 ## 📡 WebSocket 数据格式
 
-服务端向浏览器发送 JSON 文本消息。
+服务端与浏览器通过 JSON 文本消息交互。连接成功后先发送 `device_list`；客户端订阅前只接收共享状态，不接收采样和预测数据。
+
+### 设备订阅与显示限频
+
+浏览器选择设备、调整显示模式或重连后，在原 WebSocket 连接上发送：
+
+```json
+{"type":"subscribe","mac":"AA:BB:CC:DD:EE:FF","sample_hz":0}
+```
+
+- `mac`：单个设备 MAC，大小写均可；空字符串取消设备数据订阅。
+- `sample_hz`：省略或为 `0` 时保留全部采样消息；`1..25` 表示显示限频。网页提供 `0`（完整采样）和 `10`（省流显示）。
+- 新订阅替换旧订阅；不需要重新建立连接。服务端回复 `subscribed`，包含生效的 `mac` 和 `sample_hz`。
+- 无效命令回复 `error`，原订阅保持不变。控制命令最大 4096 字节。
+- 预测消息按设备筛选，不参与采样限频；数据库与推理始终接收原始数据。
+
+有采样活动的设备最多每秒向所有浏览器发送一次：
+
+```json
+{"type":"device_activity","mac":"AA:BB:CC:DD:EE:FF","age_ms":12}
+```
+
+`age_ms` 表示生成活动消息时距样本接收的时间；前端据此更新未选中设备的活跃时间，超过 5 秒无活动则显示离线。电量消息继续共享。
+
+前端图表按 15 Hz 合并刷新，隐藏标签页暂停绘图，缓存仍限制在每轴最多 750 点。波形显示最近 30 秒；10 Hz 模式是用于展示的抽点，不是低通滤波或分析用重采样。
+
+更新时需要同时更新后端与网页脚本：旧网页不发送订阅命令，连接新版后端后不会收到波形。网页已由 Nginx 提供时，继续使用现有静态资源部署；WebSocket 代理需支持双向通信。当前主机、端口及 `wsPort` 参数规则保持一致。
 
 ### 设备列表
 
@@ -545,7 +580,7 @@ cmake --install build
 
 ### 找不到 TensorRT
 
-如果不需要 GPU 推理，请不要设置 `-DIOT_ENABLE_TENSORRT=ON`。如果需要启用，请确认以下文件存在：
+TensorRT 默认启用。如果配置阶段找不到依赖，请确认以下文件存在：
 
 ```text
 NvInfer.h
@@ -584,7 +619,7 @@ sudo apt install libsqlite3-0
 
 ## ⚠️ 当前限制
 
-- WebSocket 当前主要用于服务端向监控页面单向广播，不处理浏览器发送的业务控制命令；
+- WebSocket 支持设备数据订阅，不处理浏览器发送的 BLE 设备连接、断开等控制命令；
 - MD9930 电池特征需要网关支持 GATT read，当前不会使用 IMU948 的电池写命令代替读取；
 - TensorRT engine 需要与目标 GPU、CUDA 和 TensorRT 版本匹配；
 - 生产环境部署时应限制 TCP/WebSocket 监听地址，并配置防火墙、日志轮转和服务自动重启；
