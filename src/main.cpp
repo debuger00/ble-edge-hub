@@ -86,7 +86,7 @@ void print_pipeline_stats(const iot::services::DataPipeline& pipeline,
 
 int main(int argc, char** argv) {
   try {
-    std::filesystem::path config_path{"config/config.yaml"};
+    std::filesystem::path config_path{"config/config.yaml"};  //默认是 config/config.yaml 文件
     for (int i = 1; i < argc; ++i) {
       const std::string argument = argv[i];
       if (argument == "--help" || argument == "-h") {
@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
       }
       if (argument == "--config" && i + 1 < argc)
         config_path = argv[++i];
-      else if (argument.rfind("--", 0) == 0)
+      else if (argument.rfind("--", 0) == 0)  //
         throw std::invalid_argument("unknown option: " + argument);
       else
         config_path = argument;  // backward-compatible positional config path
@@ -114,6 +114,10 @@ int main(int argc, char** argv) {
           websocket.broadcast(iot::prediction_json(mac, action), mac);
         },
         config.queues.inference_capacity);
+    //这里是注册回调函数，捕获外部变量 websocket
+    //对应 函数原型InferenceWorker(const InferenceConfig& config, PredictionHandler
+    // prediction_handler,  std::size_t queue_capacity);
+
     iot::services::DataPipeline pipeline(database, inference, websocket);
     iot::services::TcpServer tcp(config, pipeline);
 

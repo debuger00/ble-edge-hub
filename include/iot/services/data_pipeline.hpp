@@ -1,9 +1,9 @@
 #pragma once
 
-#include "iot/domain.hpp"
-
 #include <atomic>
 #include <cstddef>
+
+#include "iot/domain.hpp"
 
 namespace iot::services {
 
@@ -31,7 +31,7 @@ class DataPipeline {
   DatabaseWriter& database_;
   InferenceWorker& inference_;
   WebSocketServer& websocket_;
-  std::atomic<std::size_t> database_dropped_{0};
+  std::atomic<std::size_t> database_dropped_{0};  // 这里使用原子类型的原因，是防止多线程是写入过程 中断
   std::atomic<std::size_t> inference_rejected_{0};
   std::atomic<std::size_t> websocket_rejected_{0};
 };

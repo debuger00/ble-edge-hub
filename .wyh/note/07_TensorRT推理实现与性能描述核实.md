@@ -212,3 +212,129 @@ option(IOT_ENABLE_TENSORRT "Compile the native TensorRT backend" ON)
 > TensorRT 推理封装在 TensorRtBackend 中，初始化阶段加载 Engine 并分配 GPU 资源，推理阶段调用 enqueueV3 或 enqueueV2。InferenceEngine 负责按设备维护窗口、组装输入以及映射分类标签，InferenceWorker 负责队列和工作线程。
 
 “ONNX 转换”“部署至 Jetson Orin Nano”和“16.8 ms 降至 5.1 ms”应结合转换记录、部署记录及对照测试结果说明；目前这次源码检查没有完整验证这些内容。
+
+## 10. 推理过程的线程与队列机制（详细）
+
+这一节补充第 5 节调用链背后的并发细节：数据如何从 TCP 接收线程一路流到 GPU 推理线程，最终推给浏览器。核心思想是**每级用有界队列 + 独立线程解耦，任一级都不阻塞上游**。
+
+### 10.1 DataPipeline：分发枢纽（fan-out）
+
+文件：[data_pipeline.hpp](../../include/iot/services/data_pipeline.hpp)、[data_pipeline.cpp](../../src/services/data_pipeline.cpp)
+
+`DataPipeline` 持有三个下游引用，构造函数注入：
+
+```cpp
+DataPipeline(DatabaseWriter& database, InferenceWorker& inference, WebSocketServer& websocket);
+```
+
+一条 `SensorSample` 进来后，`publish` 把它**同时扇出**给三个消费者：
+
+```cpp
+void DataPipeline::publish(SensorSample sample) {
+  if (!database_.enqueue(sample)) { ... }              // ① 落盘
+  const auto json = sample_json(sample);
+  if (!websocket_.broadcast(json, ...)) { ... }        // ② 推浏览器
+  if (!inference_.enqueue(std::move(sample))) { ... }  // ③ 送推理
+}
+```
+
+三个消费者各有独立线程和独立队列，互不阻塞。`SensorStatus`（电池状态）走简化版 `publish`，只推浏览器，不落盘、不推理。
+
+**关键设计：非阻塞 + 丢包。** 每个 `enqueue`/`broadcast` 返回 `bool`（`false` = 队列满了被拒）。因为 `publish` 是被 TCP 接收线程（`Session::run`）调用的，一旦阻塞，那条网关连接就收不了新数据。队列满时**直接丢弃并计数**，不等待：
+
+```cpp
+const auto count = database_dropped_.fetch_add(1, std::memory_order_relaxed) + 1;
+report_drop("database", count);
+```
+
+三个 `std::atomic` 计数器（`database_dropped_`、`inference_rejected_`、`websocket_rejected_`）因多线程并发写入，必须是原子的。`report_drop` 做了日志节流：只在第 1 次和每满 1000 次打一条，避免刷屏。
+
+### 10.2 BoundedQueue：有界阻塞队列
+
+文件：[bounded_queue.hpp](../../include/iot/concurrency/bounded_queue.hpp)
+
+`InferenceWorker` 用 `concurrency::BoundedQueue<SensorSample>` 而不是裸 `std::deque`，原因是「多生产者 + 慢消费者」场景需要：
+
+- **有界**：容量固定，防止 GPU 推理慢时队列无限膨胀、内存暴涨。满时触发溢出策略：
+
+  ```cpp
+  enum class OverflowPolicy { reject_newest, drop_oldest };
+  ```
+
+- **线程安全**：内部 `mutex_` + `condition_variable_` 保护，多个 `Session` 线程并发 `try_push` 不会写坏 `deque`。
+- **阻塞消费**：`wait_pop()` 在队列空时挂起等待，消费者线程不空转 CPU；有数据 `push` 后 `notify_one` 唤醒。
+- **优雅关闭**：`close()` 置 `closed_` 并 `notify_all`，拒绝新数据、唤醒消费者把已入队的数据排空后退出。
+
+`try_push` 返回 `PushResult{pushed, dropped_oldest, rejected, closed}`；`wait_pop` 返回 `std::optional<T>`，关闭且排空后返回 `nullopt`，作为消费循环的退出条件。
+
+`DatabaseWriter` 没复用 `BoundedQueue`，而是手写了等价的 `std::deque + std::mutex + std::condition_variable`，功能相同。
+
+### 10.3 InferenceWorker::enqueue：入口闸门
+
+文件：[inference_worker.cpp](../../src/services/inference_worker.cpp)
+
+```cpp
+bool InferenceWorker::enqueue(SensorSample sample) {
+  if (!engine_.ready()) return true;   // 引擎未就绪：丢弃但装成功，避免误报
+  if (!started_) return false;         // 线程没启动：拒绝
+  const auto result = queue_.try_push(std::move(sample));
+  if (result == dropped_oldest) report_drop(queue_.dropped());
+  return result == pushed || result == dropped_oldest;
+}
+```
+
+两道闸门：`engine_.ready()` 为假（模型没加载好）直接丢弃但返回 `true`，避免引擎启动前刷丢弃告警；`started_` 为假（线程没跑）返回 `false` 明确拒绝。构造时队列用 `OverflowPolicy::drop_oldest`（[inference_worker.cpp:14](../../src/services/inference_worker.cpp)），所以「队列满」不会返回 `rejected`，而是丢最旧、收最新，仍算成功。
+
+### 10.4 InferenceWorker::run：消费循环
+
+```cpp
+void InferenceWorker::run() {
+  while (auto sample = queue_.wait_pop()) {
+    try {
+      if (const auto action = engine_.process(*sample)) {
+        if (prediction_handler_) prediction_handler_(sample->mac, *action);
+      }
+    } catch (const std::exception& error) { log(...); }
+  }
+}
+```
+
+`while (auto sample = wait_pop())` 一行两用：没数据就阻塞等，取到就进循环；`close()` 且排空后返回 `nullopt`，循环退出。`engine_.process` 返回可选动作标签，`try/catch` 保证单条坏数据不会杀死推理线程。
+
+### 10.5 PredictionHandler：结果回调出去
+
+文件：[inference_worker.hpp](../../include/iot/services/inference_worker.hpp)
+
+```cpp
+using PredictionHandler = std::function<void(const std::string&, const std::string&)>;
+```
+
+这是「接收 (设备 mac, 预测动作) 两个字符串、无返回值」的回调类型别名。`InferenceWorker` 不关心结果去哪，由外部在 [main.cpp](../../src/main.cpp) 创建时注入：
+
+```cpp
+iot::services::InferenceWorker inference(
+    config.inference,
+    [&websocket](const std::string& mac, const std::string& action) {
+      websocket.broadcast(iot::prediction_json(mac, action), mac);
+    },
+    config.queues.inference_capacity);
+```
+
+所以推理结果最终被序列化成 JSON、经 WebSocket 广播给浏览器。这种「回调/依赖注入」让推理逻辑与结果消费解耦——想改结果去向只需换这个 lambda。
+
+### 10.6 完整数据流
+
+```text
+Session::run()  TCP 接收线程
+    → decoder 解码出帧
+    → handle_device_data() 解析成 SensorSample
+    → DataPipeline::publish(sample)                     [扇出，非阻塞]
+          ├─ database_.enqueue()   → 写盘线程
+          ├─ websocket_.broadcast() → 浏览器
+          └─ inference_.enqueue()  → 有界队列 ──> InferenceWorker::run() 推理线程
+                                                    → engine_.process() (滑动窗口 + TensorRT)
+                                                    → prediction_handler_(mac, action)
+                                                    → websocket 广播 prediction_json
+```
+
+一句话：**TCP 收包 → 解析 → 三级有界队列分发 → 推理线程消费 → 回调广播**，每级用独立线程和有界队列隔离，慢下游只会丢包、绝不拖慢收包。

@@ -66,7 +66,7 @@ std::string peer_name(int socket) {
   if (getnameinfo(reinterpret_cast<sockaddr*>(&address), size, host, sizeof(host), service, sizeof(service),
                   NI_NUMERICHOST | NI_NUMERICSERV) != 0)
     return "unknown";
-  return std::string(host) + ':' + service;
+  return std::string(host) + ':' + service;  // eg  "192.168.1.20:54321"
 }
 
 std::uint16_t next_message_id() {
@@ -104,19 +104,27 @@ std::string connection_name(ConnectionState state) {
 class TcpServer::Session {
  public:
   Session(std::uint64_t id, int socket, const AppConfig& config, DataPipeline& pipeline)
-      : id_(id),
-        socket_(socket),
-        remote_(peer_name(socket)),
-        config_(config),
-        pipeline_(pipeline),
-        decoder_({[this](const protocol::GatewayFrame& frame) { on_frame(frame); },
-                  [this](const ScanEvent& event) { on_scan(event); },
-                  [this](const std::string& mac) { return config_.is_allowed_device(mac); },
-                  [this](const std::string& error) { log(LogLevel::warning, remote_ + ": " + error); }}) {}
+      : id_(id),                     //会话id
+        socket_(socket),             // 刚刚accept 接听到的客户端套接字
+        remote_(peer_name(socket)),  //
+        config_(config),             // 配置
+        pipeline_(pipeline),         // 数据管道
+        // 解码器构造时注入四个回调（观察者 / 依赖注入）：StreamDecoder 无状态，
+        // 只负责「字节流 → 完整帧」，解出什么就回调什么，业务逻辑全部转交给 Session。
+        decoder_({
+            // ① 解出完整网关帧 → Session::on_frame 按 type 分发（数据/连接/心跳/命令结果）
+            [this](const protocol::GatewayFrame& frame) { on_frame(frame); },
+            // ② 扫描帧里解出一个 BLE 设备 → Session::on_scan 记录到 discovered_
+            [this](const ScanEvent& event) { on_scan(event); },
+            // ③ 白名单过滤：只有 config.devices 里配置过的传感器才上报，其余丢弃
+            [this](const std::string& mac) { return config_.is_allowed_device(mac); },
+            // ④ 解码出错（帧长度/校验和/未知帧头）→ 打 warning 日志并带上远端地址
+            [this](const std::string& error) { log(LogLevel::warning, remote_ + ": " + error); },
+        }) {}
   ~Session() { stop(); }
   void start() {
     active_ = true;
-    worker_ = std::thread(&Session::run, this);
+    worker_ = std::thread(&Session::run, this);  // 这里启动 这个项目的服务器和蓝牙网关的通信
   }
   void stop() {
     if (active_.exchange(false)) shutdown(socket_, SHUT_RDWR);
@@ -126,7 +134,7 @@ class TcpServer::Session {
       socket_ = -1;
     }
   }
-  void queue(Bytes command) {
+  void queue(Bytes command) {  // 吧命令， 放入  outgoing_ 命令队列里面
     std::lock_guard<std::mutex> lock(queue_mutex_);
     if (active_) outgoing_.push_back(std::move(command));
   }
@@ -164,38 +172,41 @@ class TcpServer::Session {
   }
 
  private:
+  // 会话工作线程的主循环：接收网关数据、发送待发命令，并周期性执行定时任务。
   void run() {
     log(LogLevel::info, "gateway connected: " + remote_ + " (id=" + std::to_string(id_) + ')');
+    // 记录下一次「查电量」「重连设备」的时刻，避免每轮都执行。
     auto next_battery =
         std::chrono::steady_clock::now() + std::chrono::seconds(config_.battery_interval_seconds);
     auto next_reconnect =
         std::chrono::steady_clock::now() + std::chrono::seconds(config_.reconnect_interval_seconds);
-    std::array<std::uint8_t, 4096> incoming{};
+    std::array<std::uint8_t, 4096> incoming{};  // 接收缓冲区
     while (active_) {
+      // 等待 socket 可读，100ms 超时——这个超时同时兼作定时任务的节拍。
       pollfd descriptor{socket_, POLLIN, 0};
       const int status = poll(&descriptor, 1, 100);
-      if (status < 0 && errno == EINTR) continue;
-      if (status < 0 || descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+      if (status < 0 && errno == EINTR) continue;  // 被信号打断，重试
+      if (status < 0 || descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) break;  // 出错或连接关闭
       if (descriptor.revents & POLLIN) {
         const auto count = recv(socket_, incoming.data(), incoming.size(), 0);
-        if (count <= 0) break;
-        decoder_.append(incoming.data(), static_cast<std::size_t>(count));
+        if (count <= 0) break;                                              // 对端关闭连接
+        decoder_.append(incoming.data(), static_cast<std::size_t>(count));  // 交给解码器
       }
-      Bytes command;
-      {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        if (!outgoing_.empty()) {
-          command = std::move(outgoing_.front());
-          outgoing_.pop_front();
+      Bytes command;                                     // 当前要发送的命令
+      {                                                  // 限制锁的作用域，离开后自动释放锁
+        std::lock_guard<std::mutex> lock(queue_mutex_);  // 加锁保护发送队列
+        if (!outgoing_.empty()) {                        // 队列中有待发送命令
+          command = std::move(outgoing_.front());        // 取出队首命令
+          outgoing_.pop_front();                         // 从队列删除该命令
         }
       }
-      if (!command.empty() && !send_all(command)) break;
+      if (!command.empty() && !send_all(command)) break;  // 发送命令；失败则退出循环
       const auto now = std::chrono::steady_clock::now();
-      if (now >= next_battery) {
+      if (now >= next_battery) {  // 到点查询设备电量
         query_batteries();
         next_battery = now + std::chrono::seconds(config_.battery_interval_seconds);
       }
-      if (now >= next_reconnect) {
+      if (now >= next_reconnect) {  // 到点重连设备
         reconnect_devices();
         next_reconnect = now + std::chrono::seconds(config_.reconnect_interval_seconds);
       }
@@ -205,32 +216,37 @@ class TcpServer::Session {
     log(LogLevel::warning, "gateway disconnected: " + remote_);
   }
   bool send_all(const Bytes& command) {
-    auto* data = command.data();
-    auto remaining = command.size();
+    auto* data = command.data();      // 当前待发送数据的位置
+    auto remaining = command.size();  // 剩余待发送字节数
     while (remaining) {
-      const auto sent = send(socket_, data, remaining, MSG_NOSIGNAL);
-      if (sent < 0 && errno == EINTR) continue;
-      if (sent <= 0) return false;
-      data += sent;
-      remaining -= static_cast<std::size_t>(sent);
+      const auto sent = send(socket_, data, remaining, MSG_NOSIGNAL);  // TCP 发送，可能只发送一部分
+      if (sent < 0 && errno == EINTR) continue;                        // 被信号中断则重试
+      if (sent <= 0) return false;                                     // 发送失败或连接已关闭
+      data += sent;                                                    // 移到未发送数据的位置
+      remaining -= static_cast<std::size_t>(sent);                     // 更新剩余长度
     }
-    return true;
+    return true;  // 全部发送完成
   }
   void on_scan(const ScanEvent& event) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     discovered_[event.mac] = DiscoveredDevice{event.mac, event.rssi, Clock::now()};
   }
+  // 网关 → 服务器的帧分发：按应用层协议帧头里的 type 字段路由到对应处理逻辑。
+  // 注意这里只看 frame.type 和 frame.payload，不使用 frame.gateway_mac（网关身份由 TCP 连接的 Session
+  // 本身区分）。
   void on_frame(const protocol::GatewayFrame& frame) {
     if (frame.type == 0x20)
-      handle_device_data(frame.payload);
+      handle_device_data(frame.payload);  // 0x20 传感器数据帧 → 解析采样值并发布到 pipeline
     else if (frame.type == 0x21)
-      handle_connection(frame.payload);
+      handle_connection(frame.payload);  // 0x21 设备连接状态变化帧 → 更新 connected_ 状态表
     else if (frame.type == 0x22 && frame.payload.size() != 8)
-      log(LogLevel::warning, "invalid heartbeat payload length");
+      log(LogLevel::warning, "invalid heartbeat payload length");  // 0x22 心跳帧，payload 固定 8 字节
     else if (frame.type == 0xf0 && frame.payload.size() >= 2 && frame.payload[1] != 0)
+      // 0xf0 命令执行结果帧：payload[0]=命令类型，payload[1]=错误码（0 成功，非 0 失败）
       log(LogLevel::warning, "gateway command failed, type=" + std::to_string(frame.payload[0]));
     else if (frame.type != 0x22 && frame.type != 0x27 && frame.type != 0xf0)
-      log(LogLevel::warning, "unsupported gateway frame type=" + std::to_string(frame.type));
+      log(LogLevel::warning, "unsupported gateway frame type=" +
+                                 std::to_string(frame.type));  // 0x27 是已知但无需处理的帧，其余为未知类型
   }
   void handle_device_data(const Bytes& payload) {
     if (payload.size() < 9) {
@@ -265,7 +281,7 @@ class TcpServer::Session {
       return;
     }
     if (auto* sample = std::get_if<SensorSample>(&*parsed)) {
-      pipeline_.publish(std::move(*sample));
+      pipeline_.publish(std::move(*sample));  // 这里发送数据
     } else if (auto* status = std::get_if<SensorStatus>(&*parsed)) {
       pipeline_.publish(*status);
     }
@@ -329,24 +345,24 @@ class TcpServer::Session {
     for (const auto& mac : targets) connect_device(mac);
   }
 
-  std::uint64_t id_;
-  int socket_;
-  std::string remote_;
-  const AppConfig& config_;
-  DataPipeline& pipeline_;
-  protocol::StreamDecoder decoder_;
-  std::atomic<bool> active_{false};
-  std::thread worker_;
-  mutable std::mutex state_mutex_;
-  std::unordered_map<std::string, DiscoveredDevice> discovered_;
-  std::unordered_map<std::string, ConnectedDevice> connected_;
-  std::unordered_set<std::string> reconnect_;
-  std::mutex queue_mutex_;
-  std::deque<Bytes> outgoing_;
+  std::uint64_t id_;                 // 会话唯一编号
+  int socket_;                       // 与网关通信的 socket 文件描述符
+  std::string remote_;               // 对端地址，如 "192.168.1.20:54321"
+  const AppConfig& config_;          // 应用配置（只读引用）
+  DataPipeline& pipeline_;           // 数据管道，设备数据解析后投递到这里
+  protocol::StreamDecoder decoder_;  // 协议解码器，把字节流拼成完整帧
+  std::atomic<bool> active_{false};  // 该连接是否活跃：true 活跃 / false 不活跃
+  std::thread worker_;               // 会话工作线程（跑 run()）
+  mutable std::mutex state_mutex_;   // 保护 discovered_/connected_ 等状态
+  std::unordered_map<std::string, DiscoveredDevice> discovered_;  // 扫描发现的设备
+  std::unordered_map<std::string, ConnectedDevice> connected_;    // 已连接的设备
+  std::unordered_set<std::string> reconnect_;                     // 待重连的设备 mac
+  std::mutex queue_mutex_;                                        // 保护 outgoing_ 队列的互斥锁
+  std::deque<Bytes> outgoing_;                                    // 待发送的命令队列
 };
 
 TcpServer::TcpServer(const AppConfig& config, DataPipeline& pipeline)
-    : config_(config), pipeline_(pipeline) {}
+    : config_(config), pipeline_(pipeline) {}  // TCPServer 这个类的构造函数 这里传入配置config， 异步队列
 TcpServer::~TcpServer() { stop(); }
 
 void TcpServer::start() {
@@ -357,7 +373,7 @@ void TcpServer::start() {
     running_ = false;
     throw;
   }
-  accept_thread_ = std::thread(&TcpServer::accept_loop, this);
+  accept_thread_ = std::thread(&TcpServer::accept_loop, this);  // 成员函数有个，隐藏的参数 this
   log(LogLevel::info,
       "TCP gateway server listening on " + config_.tcp.host + ':' + std::to_string(config_.tcp.port));
 }

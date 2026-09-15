@@ -13,9 +13,7 @@ constexpr std::uint8_t kGatewayHead1 = 0xca;
 constexpr std::uint8_t kScanHead0 = 0xad;
 constexpr std::uint8_t kScanHead1 = 0xba;
 
-std::uint16_t be16(const std::uint8_t* data) {
-  return static_cast<std::uint16_t>((data[0] << 8U) | data[1]);
-}
+std::uint16_t be16(const std::uint8_t* data) { return static_cast<std::uint16_t>((data[0] << 8U) | data[1]); }
 
 void append_be16(Bytes& out, std::uint16_t value) {
   out.push_back(static_cast<std::uint8_t>(value >> 8U));
@@ -63,7 +61,8 @@ StreamDecoder::StreamDecoder(DecoderCallbacks callbacks, std::size_t max_frame_s
 void StreamDecoder::append(const std::uint8_t* data, std::size_t size) {
   if (!data && size) throw std::invalid_argument("null stream data");
   buffer_.insert(buffer_.end(), data, data + size);
-  while (consume_one()) {}
+  while (consume_one()) {
+  }
   if (buffer_.size() > max_frame_size_) {
     report("receive buffer exceeded configured frame limit; resynchronizing");
     buffer_.clear();
@@ -130,7 +129,8 @@ bool StreamDecoder::consume_scan_frame() {
       report("scan frame device count exceeds payload");
       break;
     }
-    const int rssi_value = buffer_[offset + 6] < 128 ? buffer_[offset + 6] : static_cast<int>(buffer_[offset + 6]) - 256;
+    const int rssi_value =
+        buffer_[offset + 6] < 128 ? buffer_[offset + 6] : static_cast<int>(buffer_[offset + 6]) - 256;
     ScanEvent event{format_mac(buffer_.data() + offset), static_cast<std::int8_t>(rssi_value)};
     if ((!callbacks_.allow_scan_device || callbacks_.allow_scan_device(event.mac)) && callbacks_.on_scan)
       callbacks_.on_scan(event);
@@ -144,8 +144,8 @@ void StreamDecoder::report(std::string message) const {
   if (callbacks_.on_error) callbacks_.on_error(message);
 }
 
-Bytes create_command(const std::string& gateway_mac, std::uint8_t type,
-                     std::uint16_t message_id, const Bytes& payload) {
+Bytes create_command(const std::string& gateway_mac, std::uint8_t type, std::uint16_t message_id,
+                     const Bytes& payload) {  //这里网关发送mac 地址
   const auto length = 14U + payload.size();
   if (length > 65535) throw std::length_error("gateway command is too large");
   Bytes frame{kGatewayHead0, kGatewayHead1};
@@ -181,8 +181,7 @@ Bytes create_disconnect_command(const std::string& gateway_mac, std::uint16_t me
 }
 
 Bytes create_send_data_command(const std::string& gateway_mac, std::uint16_t message_id,
-                               const std::string& target_mac, std::uint16_t write_handle,
-                               const Bytes& data) {
+                               const std::string& target_mac, std::uint16_t write_handle, const Bytes& data) {
   if (data.size() > 255) throw std::length_error("BLE write payload exceeds one-byte length");
   Bytes payload{1};
   const auto mac = parse_mac(target_mac);
@@ -198,22 +197,28 @@ Bytes create_imu948_parameters_command(const std::string& gateway_mac, std::uint
                                        const std::string& target_mac, std::uint16_t write_handle,
                                        int frequency_hz, std::uint16_t subscribe_tag) {
   const auto fps = static_cast<std::uint8_t>(std::clamp(frequency_hz, 1, 250));
-  Bytes data{0x12, 0x05, 0xff, 0x00, 0x04, fps, 0x01, 0x03, 0x05,
-             static_cast<std::uint8_t>(subscribe_tag), static_cast<std::uint8_t>(subscribe_tag >> 8U)};
+  Bytes data{0x12,
+             0x05,
+             0xff,
+             0x00,
+             0x04,
+             fps,
+             0x01,
+             0x03,
+             0x05,
+             static_cast<std::uint8_t>(subscribe_tag),
+             static_cast<std::uint8_t>(subscribe_tag >> 8U)};
   return create_send_data_command(gateway_mac, message_id, target_mac, write_handle, data);
 }
 
-std::vector<Bytes> create_md9930_frequency_commands(const std::string& gateway_mac,
-                                                     std::uint16_t message_id,
-                                                     const std::string& target_mac,
-                                                     std::uint16_t write_handle,
-                                                     std::uint16_t command_handle,
-                                                     int frequency_hz) {
+std::vector<Bytes> create_md9930_frequency_commands(const std::string& gateway_mac, std::uint16_t message_id,
+                                                    const std::string& target_mac, std::uint16_t write_handle,
+                                                    std::uint16_t command_handle, int frequency_hz) {
   const auto period = static_cast<std::uint16_t>(std::clamp(1000 / std::max(1, frequency_hz), 20, 1000));
   Bytes value{static_cast<std::uint8_t>(period >> 8U), static_cast<std::uint8_t>(period), 0, 0, 0, 0};
   return {create_send_data_command(gateway_mac, message_id, target_mac, write_handle, value),
-          create_send_data_command(gateway_mac, static_cast<std::uint16_t>(message_id + 1),
-                                   target_mac, command_handle, Bytes{0x0a})};
+          create_send_data_command(gateway_mac, static_cast<std::uint16_t>(message_id + 1), target_mac,
+                                   command_handle, Bytes{0x0a})};
 }
 
 }  // namespace iot::protocol

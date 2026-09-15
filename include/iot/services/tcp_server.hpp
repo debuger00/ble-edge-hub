@@ -1,8 +1,5 @@
 #pragma once
 
-#include "iot/config.hpp"
-#include "iot/domain.hpp"
-
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -12,6 +9,9 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include "iot/config.hpp"
+#include "iot/domain.hpp"
 
 namespace iot::services {
 
@@ -57,7 +57,7 @@ class TcpServer {
   const AppConfig& config_;
   DataPipeline& pipeline_;
   std::atomic<bool> running_{false};
-  int listen_socket_{-1};
+  int listen_socket_{-1};  // 这里有关实例属性
   std::thread accept_thread_;
   mutable std::mutex sessions_mutex_;
   std::unordered_map<std::uint64_t, std::shared_ptr<Session>> sessions_;
