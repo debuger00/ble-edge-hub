@@ -19,7 +19,7 @@
 #include "iot/services/websocket_server.hpp"
 
 namespace {
-volatile std::sig_atomic_t interrupted = 0;
+volatile std::sig_atomic_t interrupted = 0;  // 信号标志位
 void signal_handler(int) { interrupted = true; }
 
 std::string device_list_json(const iot::AppConfig& config) {
@@ -191,7 +191,7 @@ int main(int argc, char** argv) {
       iot::log(iot::LogLevel::info, "running without interactive CLI; send SIGINT or SIGTERM to stop");
       while (!interrupted) std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    tcp.stop();
+    tcp.stop();  //逐层 停止， 和 实例化  start 顺序相反。
     inference.stop();
     websocket.stop();
     database.stop();

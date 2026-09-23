@@ -17,7 +17,8 @@ InferenceEngine::InferenceEngine(const InferenceConfig& config) : config_(config
 #ifdef IOT_ENABLE_TENSORRT
   if (config_.enabled) {
     try {
-      backend_ = inference::make_tensorrt_backend(config_.engine_path, config_.window_size * 3, kClasses.size());
+      backend_ =
+          inference::make_tensorrt_backend(config_.engine_path, config_.window_size * 3, kClasses.size());
       log(LogLevel::info, "TensorRT engine loaded: " + config_.engine_path.string());
     } catch (const std::exception& error) {
       log(LogLevel::error, std::string("TensorRT disabled: ") + error.what());
@@ -32,7 +33,8 @@ InferenceEngine::InferenceEngine(const InferenceConfig& config, std::unique_ptr<
     : config_(config), backend_(std::move(backend)) {}
 InferenceEngine::~InferenceEngine() = default;
 
-std::optional<std::string> InferenceEngine::process(const SensorSample& sample) {
+std::optional<std::string> InferenceEngine::process(
+    const SensorSample& sample) {  // inference_worker 使用的主要接口
   if (!backend_ || !sample.accel) return std::nullopt;
   std::lock_guard<std::mutex> lock(mutex_);
   auto& window = windows_[sample.mac];
@@ -42,7 +44,7 @@ std::optional<std::string> InferenceEngine::process(const SensorSample& sample) 
   if (++window.full_window_updates < config_.stride) return std::nullopt;
   window.full_window_updates = 0;
 
-  std::vector<float> input(config_.window_size * 3);
+  std::vector<float> input(config_.window_size * 3);  // *3 是因为 3 个通道
   for (std::size_t time = 0; time < window.samples.size(); ++time) {
     input[time] = static_cast<float>(window.samples[time].x);
     input[config_.window_size + time] = static_cast<float>(window.samples[time].y);
@@ -57,4 +59,3 @@ std::optional<std::string> InferenceEngine::process(const SensorSample& sample) 
 }
 
 }  // namespace iot::services
-

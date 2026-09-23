@@ -27,8 +27,8 @@ struct SensorSample {
   std::optional<Vec3> mag;
   std::optional<std::uint64_t> sensor_uptime_ms;
   std::optional<std::uint16_t> counter;
-  std::optional<std::uint32_t> ticks;
-  Clock::time_point received_at{Clock::now()};
+  std::optional<std::uint32_t> ticks;           //设备的 tick 计数
+  Clock::time_point received_at{Clock::now()};  //接收时间，默认初始化为创建对象时的当前时间
 };
 
 struct SensorStatus {
@@ -67,4 +67,3 @@ struct ScanEvent {
 };
 
 }  // namespace iot
-

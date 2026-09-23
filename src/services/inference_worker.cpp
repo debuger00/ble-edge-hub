@@ -27,10 +27,10 @@ void InferenceWorker::start() {
   log(LogLevel::info, "inference worker started; queue capacity=" + std::to_string(queue_.capacity()));
 }
 
-// 把一条采样投递进推理队列，返回「是否被接受」（true = 收下，false = 拒绝）。
+// 这是Pipeline 推理送进来的第一个 把一条采样投递进推理队列，返回「是否被接受」（true = 收下，false = 拒绝）。
 bool InferenceWorker::enqueue(SensorSample sample) {
-  if (!engine_.ready()) return true;   // 引擎未就绪：直接丢弃但装作成功，避免误报丢弃告警
-  if (!started_) return false;         // 推理线程没启动：队列无人消费，明确拒绝
+  if (!engine_.ready()) return true;  // 引擎未就绪：直接丢弃但装作成功，避免误报丢弃告警
+  if (!started_) return false;        // 推理线程没启动：队列无人消费，明确拒绝
   const auto result = queue_.try_push(std::move(sample));  // 移动进有界队列
   if (result == concurrency::PushResult::dropped_oldest) report_drop(queue_.dropped());  // 满了丢最旧，记日志
   // 新样本被收下（含「丢旧换新」）就算成功，只有拒绝/已关闭才算失败。

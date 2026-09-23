@@ -27,7 +27,7 @@ void DataPipeline::publish(SensorSample sample) {
     report_drop("websocket", count);
   }
 
-  if (!inference_.enqueue(std::move(sample))) {
+  if (!inference_.enqueue(std::move(sample))) {  //这里使用move 比较好啊， 是move 的使用场景
     const auto count = inference_rejected_.fetch_add(1, std::memory_order_relaxed) + 1;
     report_drop("inference", count);
   }

@@ -44,18 +44,21 @@ class TensorRtBackend final : public services::InferenceBackend {
   TensorRtBackend(const std::filesystem::path& path, std::size_t inputs, std::size_t outputs)
       : input_elements_(inputs), output_elements_(outputs) {
     // 读取已经构建好的 TensorRT 序列化 Engine 文件。
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    std::ifstream file(
+        path,
+        std::ios::binary | std::ios::ate);  // 以二进制模式打开文件， ate 把光标插入最好，方便读文件有多少字节
     if (!file) throw std::runtime_error("cannot open TensorRT engine: " + path.string());
     const auto size = file.tellg();
     if (size <= 0) throw std::runtime_error("TensorRT engine is empty");
     std::vector<char> blob(static_cast<std::size_t>(size));
     file.seekg(0);
-    file.read(blob.data(), size);
+    file.read(blob.data(), size);  //从当前位置，也就是文件开头，尝试读取 size 个字节，存入 blob：
 
     // 创建 TensorRT Runtime，并从二进制数据恢复 ICudaEngine。
     runtime_.reset(nvinfer1::createInferRuntime(logger_));
     if (!runtime_) throw std::runtime_error("createInferRuntime failed");
-    engine_.reset(runtime_->deserializeCudaEngine(blob.data(), blob.size()));
+    engine_.reset(runtime_->deserializeCudaEngine(
+        blob.data(), blob.size()));  //将这段二进制数据 ===反序列化===成一个引擎对象，并返回指针
     if (!engine_)
       throw std::runtime_error(
           "deserializeCudaEngine failed; engine may target another TensorRT/GPU version");
@@ -134,9 +137,10 @@ class TensorRtBackend final : public services::InferenceBackend {
 
  private:
   Logger logger_;
-  std::unique_ptr<nvinfer1::IRuntime, TrtDeleter<nvinfer1::IRuntime>> runtime_;
-  std::unique_ptr<nvinfer1::ICudaEngine, TrtDeleter<nvinfer1::ICudaEngine>> engine_;
-  std::unique_ptr<nvinfer1::IExecutionContext, TrtDeleter<nvinfer1::IExecutionContext>> context_;
+  std::unique_ptr<nvinfer1::IRuntime, TrtDeleter<nvinfer1::IRuntime>> runtime_;       // IRuntime对象
+  std::unique_ptr<nvinfer1::ICudaEngine, TrtDeleter<nvinfer1::ICudaEngine>> engine_;  // ICudaEngine对象
+  std::unique_ptr<nvinfer1::IExecutionContext, TrtDeleter<nvinfer1::IExecutionContext>>
+      context_;  // IExecutionContext对象
   cudaStream_t stream_{};
   void* input_{};
   void* output_{};

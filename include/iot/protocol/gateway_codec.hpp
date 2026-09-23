@@ -9,7 +9,7 @@
 
 namespace iot::protocol {
 
-struct GatewayFrame {
+struct GatewayFrame {  //注意这个
   std::string gateway_mac;
   std::uint16_t message_id{};
   std::uint8_t type{};

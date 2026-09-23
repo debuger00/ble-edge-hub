@@ -1,14 +1,14 @@
 #pragma once
 
-#include "iot/config.hpp"
-#include "iot/domain.hpp"
-
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
+
+#include "iot/config.hpp"
+#include "iot/domain.hpp"
 
 namespace iot::services {
 
@@ -24,7 +24,7 @@ class InferenceEngine {
   InferenceEngine(const InferenceConfig& config, std::unique_ptr<InferenceBackend> backend);
   ~InferenceEngine();
   std::optional<std::string> process(const SensorSample& sample);
-  bool ready() const noexcept { return static_cast<bool>(backend_); }
+  bool ready() const noexcept { return static_cast<bool>(backend_); }  // 注意这个就是完整的定义
 
  private:
   struct DeviceWindow {
@@ -36,6 +36,4 @@ class InferenceEngine {
   std::unordered_map<std::string, DeviceWindow> windows_;
   std::mutex mutex_;
 };
-
 }  // namespace iot::services
-

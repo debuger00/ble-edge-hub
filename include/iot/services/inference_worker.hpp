@@ -1,14 +1,14 @@
 #pragma once
 
-#include "iot/concurrency/bounded_queue.hpp"
-#include "iot/services/inference_engine.hpp"
-
 #include <atomic>
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
 #include <thread>
+
+#include "iot/concurrency/bounded_queue.hpp"
+#include "iot/services/inference_engine.hpp"
 
 namespace iot::services {
 
@@ -39,7 +39,7 @@ class InferenceWorker {
 
   InferenceEngine engine_;
   PredictionHandler prediction_handler_;
-  concurrency::BoundedQueue<SensorSample> queue_;
+  concurrency::BoundedQueue<SensorSample> queue_;  // 这里的 每个成员的， 都是一个采样点
   std::atomic<bool> started_{false};
   std::thread worker_;
 };

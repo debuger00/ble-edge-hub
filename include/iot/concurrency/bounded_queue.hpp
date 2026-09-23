@@ -28,8 +28,7 @@ enum class PushResult {
 template <typename T>
 class BoundedQueue {
  public:
-  explicit BoundedQueue(std::size_t capacity,
-                        OverflowPolicy overflow_policy = OverflowPolicy::reject_newest)
+  explicit BoundedQueue(std::size_t capacity, OverflowPolicy overflow_policy = OverflowPolicy::reject_newest)
       : capacity_(capacity), overflow_policy_(overflow_policy) {
     if (capacity_ == 0) throw std::invalid_argument("queue capacity must be positive");
   }
@@ -54,7 +53,7 @@ class BoundedQueue {
     return result;
   }
 
-  std::optional<T> wait_pop() {
+  std::optional<T> wait_pop() {  //等待并取出数据
     std::unique_lock<std::mutex> lock(mutex_);
     ready_.wait(lock, [&] { return closed_ || !queue_.empty(); });
     if (queue_.empty()) return std::nullopt;

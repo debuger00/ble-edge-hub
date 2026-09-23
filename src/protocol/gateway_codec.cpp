@@ -29,11 +29,12 @@ std::uint8_t xor_checksum(const std::uint8_t* data, std::size_t size) noexcept {
 }
 
 std::string format_mac(const std::uint8_t* bytes) {
+  // 6 个字节的 MAC 地址转换成字符串
   std::ostringstream out;
   out << std::uppercase << std::hex << std::setfill('0');
   for (int i = 0; i < 6; ++i) {
-    if (i) out << ':';
-    out << std::setw(2) << static_cast<unsigned>(bytes[i]);
+    if (i) out << ':';  // 在第一个字节前不加冒号，后面的每个字节前都加一个冒号。
+    out << std::setw(2) << static_cast<unsigned>(bytes[i]);  // setw(n:2) 设置输出宽度至少为
   }
   return out.str();
 }
@@ -58,7 +59,8 @@ StreamDecoder::StreamDecoder(DecoderCallbacks callbacks, std::size_t max_frame_s
   buffer_.reserve(max_frame_size);
 }
 
-void StreamDecoder::append(const std::uint8_t* data, std::size_t size) {
+void StreamDecoder::append(const std::uint8_t* data,
+                           std::size_t size) {  // 这里是TCPserver 处理消息的主要入口
   if (!data && size) throw std::invalid_argument("null stream data");
   buffer_.insert(buffer_.end(), data, data + size);
   while (consume_one()) {
@@ -79,6 +81,7 @@ bool StreamDecoder::consume_one() {
 }
 
 bool StreamDecoder::consume_gateway_frame() {
+  //处理数据帧
   if (buffer_.size() < 4) return false;
   const auto length = static_cast<std::size_t>(be16(buffer_.data() + 2));
   if (length < 14 || length > max_frame_size_) {
@@ -98,7 +101,7 @@ bool StreamDecoder::consume_gateway_frame() {
   frame.message_id = be16(buffer_.data() + 10);
   frame.type = buffer_[12];
   frame.payload.assign(buffer_.begin() + 13, buffer_.begin() + static_cast<std::ptrdiff_t>(length - 1));
-  if (callbacks_.on_gateway_frame) callbacks_.on_gateway_frame(frame);
+  if (callbacks_.on_gateway_frame) callbacks_.on_gateway_frame(frame);  // 这里是回调函数
   buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(length));
   return true;
 }
