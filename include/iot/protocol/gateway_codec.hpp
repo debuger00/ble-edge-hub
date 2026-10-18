@@ -52,6 +52,8 @@ Bytes create_connect_command(const std::string& gateway_mac, std::uint16_t messa
                              std::uint16_t notify_handle, std::uint16_t cccd_handle);
 Bytes create_disconnect_command(const std::string& gateway_mac, std::uint16_t message_id,
                                 const std::string& target_mac);
+Bytes create_read_data_command(const std::string& gateway_mac, std::uint16_t message_id,
+                               const std::string& target_mac, std::uint16_t read_handle);
 Bytes create_send_data_command(const std::string& gateway_mac, std::uint16_t message_id,
                                const std::string& target_mac, std::uint16_t write_handle, const Bytes& data);
 Bytes create_imu948_parameters_command(const std::string& gateway_mac, std::uint16_t message_id,

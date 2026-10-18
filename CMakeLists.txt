@@ -11,12 +11,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Threads REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 add_library(iot_core
     src/config.cpp
     src/protocol/gateway_codec.cpp
     src/protocol/sensor_parsers.cpp
     src/protocol/websocket.cpp
+    src/services/health_monitor.cpp
+    src/services/alert_email.cpp
     src/services/data_pipeline.cpp
     src/services/database_writer.cpp
     src/services/inference_engine.cpp
@@ -25,6 +28,7 @@ add_library(iot_core
     src/services/tcp_server.cpp) # 因为没有明确`STATIC` 或 `SHARE`  其类型由 `BUILD_SHARED_LIBS` 决定。未设置时通常生成静态库：
 target_include_directories(iot_core PUBLIC include)
 target_link_libraries(iot_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+target_compile_definitions(iot_core PRIVATE IOT_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}")
 target_compile_options(iot_core PRIVATE -Wall -Wextra -Wpedantic)
 
 if(IOT_ENABLE_TENSORRT)
@@ -55,6 +59,10 @@ if(IOT_BUILD_TESTS)
   target_link_libraries(protocol_tests PRIVATE iot_core)
   target_compile_definitions(protocol_tests PRIVATE IOT_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME protocol_tests COMMAND protocol_tests)
+  add_executable(health_monitor_tests tests/health_monitor_tests.cpp)
+  target_link_libraries(health_monitor_tests PRIVATE iot_core)
+  target_compile_definitions(health_monitor_tests PRIVATE IOT_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+  add_test(NAME health_monitor_tests COMMAND health_monitor_tests)
   find_program(IOT_NODE_EXECUTABLE node)
   if(IOT_NODE_EXECUTABLE)
     add_test(NAME web_frontend_tests
@@ -62,6 +70,17 @@ if(IOT_BUILD_TESTS)
   endif()
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME download_integration
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/download_integration.py)
+    set_tests_properties(download_integration PROPERTIES TIMEOUT 30)
+    add_test(NAME alert_integration
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/alert_integration.py
+              $<TARGET_FILE:ble-iot-edge>)
+    set_tests_properties(alert_integration PROPERTIES TIMEOUT 45)
+    add_test(NAME schedule_integration
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/schedule_integration.py
+              $<TARGET_FILE:ble-iot-edge>)
+    set_tests_properties(schedule_integration PROPERTIES TIMEOUT 30)
     add_executable(websocket_fixture tests/websocket_fixture.cpp)
     target_link_libraries(websocket_fixture PRIVATE iot_core)
     add_test(NAME websocket_integration

@@ -75,8 +75,19 @@ bool StreamDecoder::consume_one() {
   if (buffer_.size() < 2) return false;
   if (buffer_[0] == kGatewayHead0 && buffer_[1] == kGatewayHead1) return consume_gateway_frame();
   if (buffer_[0] == kScanHead0 && buffer_[1] == kScanHead1) return consume_scan_frame();
-  buffer_.erase(buffer_.begin());
-  report("discarded byte while searching for a frame header");
+  // Skip a run of garbage at once. A corrupt scan report can contain thousands
+  // of bytes; logging and shifting the vector for every byte stalls reception.
+  std::size_t skip = 1;
+  while (skip + 1 < buffer_.size()) {
+    if ((buffer_[skip] == kGatewayHead0 && buffer_[skip + 1] == kGatewayHead1) ||
+        (buffer_[skip] == kScanHead0 && buffer_[skip + 1] == kScanHead1)) break;
+    ++skip;
+  }
+  // Preserve a possible first header byte split across TCP reads.
+  if (skip + 1 == buffer_.size() && buffer_[skip] != kGatewayHead0 && buffer_[skip] != kScanHead0)
+    ++skip;
+  buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(skip));
+  report("discarded " + std::to_string(skip) + " bytes while searching for a frame header");
   return true;
 }
 
@@ -124,8 +135,13 @@ bool StreamDecoder::consume_scan_frame() {
     return true;
   }
   const auto type = buffer_[4];
+  if (type < 1 || type > 3) {
+    report("unsupported scan frame type=" + std::to_string(type));
+    buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(length));
+    return true;
+  }
   const auto count = be16(buffer_.data() + 17);
-  const std::size_t block_size = type == 0x02 ? 69 : 38;
+  const std::size_t block_size = type == 0x03 ? 7 : (type == 0x02 ? 69 : 38);
   std::size_t offset = 19;
   for (std::uint16_t i = 0; i < count; ++i) {
     if (offset + block_size > length - 2) {
@@ -181,6 +197,17 @@ Bytes create_disconnect_command(const std::string& gateway_mac, std::uint16_t me
   const auto mac = parse_mac(target_mac);
   payload.insert(payload.end(), mac.begin(), mac.end());
   return create_command(gateway_mac, 0x11, message_id, payload);
+}
+
+Bytes create_read_data_command(const std::string& gateway_mac, std::uint16_t message_id,
+                               const std::string& target_mac, std::uint16_t read_handle) {
+  Bytes payload{1};
+  const auto mac = parse_mac(target_mac);
+  payload.insert(payload.end(), mac.begin(), mac.end());
+  append_be16(payload, read_handle);
+  // KTBG602 read: type 02, length 01, dummy data 00.
+  payload.insert(payload.end(), {0x02, 0x01, 0x00});
+  return create_command(gateway_mac, 0x12, message_id, payload);
 }
 
 Bytes create_send_data_command(const std::string& gateway_mac, std::uint16_t message_id,

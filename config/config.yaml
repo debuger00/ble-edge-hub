@@ -7,10 +7,32 @@ websocket:
 
 # 网关不要求指定真实 MAC 时保持广播地址；如果固件要求，请改为实际网关 MAC。
 gateway_mac: "FF:FF:FF:FF:FF:FF"
-battery_interval_seconds: 30
+battery_interval_seconds: 300  # 电量查询间隔（秒），300 = 5 分钟；适用于 IMU948 和 MD9930
 reconnect_interval_seconds: 60
 retention_days: 7
 data_dir: "data"
+
+# 每天按北京时间（UTC+8）采集；起点包含，终点不包含。修改后重启程序。
+# enabled: false 恢复原来的手动连接模式。停止采集通过断开 BLE 实现，并非物理关机。
+collection_schedule:
+  enabled: true
+  start_time: "11:00"
+  stop_time: "23:59"
+
+# 报警总开关：填好 SMTP 和邮箱后改成 true；修改配置后重启。
+# 只在应采集的时段监测有效采样；连续 300 秒（5 分钟）无数据即报警。
+alerts:
+  enabled: false
+  timeout_seconds: 300
+  retry_interval_seconds: 60  # 邮件发送失败后的重试间隔
+  smtp_timeout_seconds: 15   # 单次邮件发送的总超时
+  smtp_host: "smtp.qq.com"
+  smtp_port: 465
+  smtp_security: "ssl"      # ssl(通常465) / starttls(通常587) / none(无加密)
+  smtp_username: "3211185473@qq.com" # 发件邮箱登录名
+  smtp_password: "wgbbqtrovfmgdfhf" # SMTP授权码
+  from_email: "3211185473@qq.com" # 发件邮箱
+  to_email: "wyh3209379906@foxmail.com" # 收件邮箱（一个地址）
 
 inference:
   enabled: true
@@ -28,24 +50,45 @@ queues:
 sensor_types:
   imu948:
     frequency: 25
+    subscribe_tag: 0x000F  # 保留加速度/原始加速度/角速度/磁场，减少未使用字段传输
     notify_handle: 0x0008
     cccd_handle: 0x0009
     write_handle: 0x0006
   md9930:
     frequency: 25
-    notify_handle: 0x000A
+    notify_handle: 0x000B  # 实测 MD9930 FFF1 通知数据的 value handle
     cccd_handle: 0x000C
-    write_handle: 0x0014
+    write_handle: 0x0015  # GATT 实测 FFF4 value handle；0x0014 是声明句柄
+    battery_handle: 0x000F  # FFF2 电量读句柄；007 实测，同型号设备需按固件核对
     command_handle: 0x0012
 
 devices:
-  - mac: "CE:43:75:25:96:BF"
+  - id: "001"
+    mac: "CE:43:75:25:96:BF"
     type: imu948
-  - mac: "3F:B8:12:EE:3C:37"
+  - id: "002"
+    mac: "3F:B8:12:EE:3C:37"
     type: imu948
-  - mac: "27:EE:B8:B3:10:9F"
+  - id: "003"
+    mac: "27:EE:B8:B3:10:9F"
     type: imu948
-  - mac: "54:6C:0E:B9:1A:4C"
+  - id: "004"
+    mac: "2E:1D:D9:E9:60:91"
+    type: imu948
+
+
+  - id: "005"
+    mac: "54:6C:0E:B9:1A:4C"
     type: md9930
-  - mac: "54:6C:0E:B9:19:EA"
+
+  - id: "006"
+    mac: "54:6C:0E:B9:19:EA"
+    type: md9930
+
+  - id: "007"
+    mac: "54:6C:0E:B8:37:E4"
+    type: md9930
+
+  - id: "008"
+    mac: "54:6C:0E:B8:51:1B"
     type: md9930

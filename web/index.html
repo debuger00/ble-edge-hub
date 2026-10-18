@@ -9,23 +9,24 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.3/css/bulma.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
-    <style>
-        /* 覆盖 Bulma button 默认样式，允许内部多行/弹性布局以容纳更多数据 */
-        #device-selector .button {
-            height: auto;
-            padding: 0.5rem 1rem;
-            flex-direction: column;
-            align-items: flex-start;
-        }
-    </style>
+    <link rel="stylesheet" href="dashboard.css?v=20261018">
 </head>
 
 <body>
     <section class="section">
-        <div class="container">
+        <div class="container dashboard">
+            <header class="page-header">
+                <div><p class="eyebrow">BLE · EDGE MONITOR</p><h1>传感器监测中心</h1><p class="page-description">设备状态、实时波形与行为识别，一处掌握。</p></div>
+                <span class="header-badge">边缘采集工作台</span>
+            </header>
+            <section class="connection-panel" aria-label="实时连接状态">
+                <p id="status" class="subtitle is-warning" role="status" aria-live="polite">正在连接服务器...</p>
+                <p id="waveform-status" class="waveform-status" role="status">等待设备列表与采样数据。</p>
+                <p class="connection-note">服务器连接与传感器采样状态分别显示；设备是否在线以最近采样为准。</p>
+            </section>
             <div class="box">
-                <h2 class="title is-4">设备选择与状态</h2>
-                <p class="mb-3">当前显示设备: <strong id="current-device-mac">无</strong></p>
+                <div class="section-heading"><h2 class="title is-4">设备总览</h2><span class="section-caption">点击设备切换实时数据</span></div>
+                <p class="selected-device">当前查看 <span class="selection-divider">/</span> <strong id="current-device-mac">无</strong></p>
                 <div class="field is-grouped is-align-items-center">
                     <label for="display-rate" class="mr-2">波形显示</label>
                     <div class="select is-small">
@@ -36,30 +37,34 @@
                     </div>
                     <span class="help ml-3">图表每秒刷新 15 次；省流显示不影响原始数据保存。</span>
                 </div>
+                <p class="help mb-3">电量显示最近一次上报值和时间；离线后保留，并保存在当前浏览器中。</p>
                 <div id="device-selector" class="buttons are-small">
                 </div>
             </div>
-            <p id="status" class="subtitle is-warning">正在连接服务器...</p>
-            <p id="waveform-status" class="help mb-4" role="status">等待设备列表与采样数据。</p>
 
-            <h1 class="title">实时加速度数据 (Acceleration)</h1>
-            <div class="box">
+<div class="box chart-panel"><div class="section-heading"><h2 class="title is-4">实时加速度</h2><span class="section-caption">ACCELERATION · m/s²</span></div>
                 <canvas id="accelChart" width="800" height="300"></canvas>
             </div>
 
-            <h1 class="title">基于传感器时钟的波形图 (Sensor Uptime)</h1>
-            <div class="box">
-                <canvas id="sensorTimeChart" width="800" height="300"></canvas>
-            </div>
-
-            <h1 class="title">实时行为识别 (Action Recognition)</h1>
-            <div class="box">
+<div class="box chart-panel"><div class="section-heading"><h2 class="title is-4">实时行为识别</h2><span class="section-caption">ACTION RECOGNITION</span></div>
                 <canvas id="actionChart" width="800" height="200"></canvas>
             </div>
+            <div class="box">
+                <div class="section-heading"><h2 class="title is-4">历史数据下载</h2><span class="section-caption">按日期与设备导出</span></div>
+                <form id="download-form" action="/api/download" method="get" target="_blank" class="download-controls">
+                    <div><label for="download-date">采集日期</label><div class="select"><select id="download-date" name="date" required></select></div></div>
+                    <div><label for="download-format">文件格式</label><div class="select"><select id="download-format" name="format"><option value="csv">CSV 表格</option><option value="sqlite">SQLite 数据库</option></select></div></div>
+                    <div><label for="download-device">设备（CSV）</label><div class="select"><select id="download-device" name="mac"><option value="">全部设备</option></select></div></div>
+                    <button id="download-button" type="submit" class="button is-link" disabled>下载数据</button>
+                    <button id="download-refresh" type="button" class="button">刷新日期</button>
+                </form>
+                <p id="download-status" class="help mt-3" role="status"></p>
+            </div>
+            <footer class="page-footer">BLE IoT Edge · 实时采集与分析</footer>
         </div>
     </section>
 
-    <script src="app.js?v=20260905-subscription-2" defer></script>
+    <script src="app.js?v=20261018-dashboard" defer></script>
 </body>
 
 </html>

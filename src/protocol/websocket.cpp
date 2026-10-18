@@ -1,16 +1,15 @@
 #include "iot/protocol/websocket.hpp"
 
-#include "iot/config.hpp"
-
 #include <regex>
 #include <stdexcept>
 #include <unordered_map>
 
+#include "iot/config.hpp"
+
 namespace iot::protocol {
 
-void WebSocketDecoder::append(
-    const std::uint8_t* data, std::size_t size,
-    const std::function<void(const WebSocketMessage&)>& handler) {
+void WebSocketDecoder::append(const std::uint8_t* data, std::size_t size,
+                              const std::function<void(const WebSocketMessage&)>& handler) {
   buffer_.insert(buffer_.end(), data, data + size);
   while (buffer_.size() >= 2) {
     const auto first = buffer_[0];
@@ -22,8 +21,7 @@ void WebSocketDecoder::append(
       throw std::runtime_error("invalid WebSocket frame");
     std::size_t length = buffer_[1] & 0x7f;
     std::size_t header = 2;
-    if (control && (!final || length > 125))
-      throw std::runtime_error("invalid WebSocket control frame");
+    if (control && (!final || length > 125)) throw std::runtime_error("invalid WebSocket control frame");
     if (length == 127) throw std::runtime_error("WebSocket command too large");
     if (length == 126) {
       if (buffer_.size() < 4) return;
@@ -41,10 +39,8 @@ void WebSocketDecoder::append(
       if (opcode == 8 && length == 1) throw std::runtime_error("invalid close frame");
       handler({opcode, std::move(payload)});
     } else {
-      if ((opcode == 0) != fragment_open_)
-        throw std::runtime_error("invalid WebSocket fragmentation");
-      if (fragmented_.size() + payload.size() > 4096)
-        throw std::runtime_error("WebSocket command too large");
+      if ((opcode == 0) != fragment_open_) throw std::runtime_error("invalid WebSocket fragmentation");
+      if (fragmented_.size() + payload.size() > 4096) throw std::runtime_error("WebSocket command too large");
       fragmented_ += payload;
       fragment_open_ = !final;
       if (final) {
@@ -88,8 +84,7 @@ WebSocketSubscription parse_subscription(const std::string& json) {
   subscription.mac = normalize_mac(subscription.mac);
   if (fields.count("sample_hz")) {
     const auto& hz = fields.at("sample_hz");
-    if (hz.empty() || hz.front() == '"' || hz.size() > 2)
-      throw std::runtime_error("sample_hz must be 0..25");
+    if (hz.empty() || hz.front() == '"' || hz.size() > 2) throw std::runtime_error("sample_hz must be 0..25");
     subscription.sample_hz = static_cast<unsigned>(std::stoul(hz));
     if (subscription.sample_hz > 25) throw std::runtime_error("sample_hz must be 0..25");
   }

@@ -49,6 +49,7 @@ class TcpServer {
   std::vector<GatewaySnapshot> snapshots() const;
   bool connect_device(std::uint64_t gateway_id, const std::string& mac);
   bool disconnect_device(std::uint64_t gateway_id, const std::string& mac);
+  bool inspect_gateway(std::uint64_t gateway_id, bool enable_scan_output = false);
 
  private:
   class Session;

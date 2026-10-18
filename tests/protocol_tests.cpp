@@ -11,6 +11,8 @@
 #include <condition_variable>
 #include <filesystem>
 #include <iostream>
+#include <fstream>
+#include <unistd.h>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -37,12 +39,59 @@ void test_gateway_command_and_stream_decoder() {
 
 void test_config() {
   const auto config = iot::AppConfig::load(std::filesystem::path(IOT_TEST_SOURCE_DIR) / "config/config.yaml");
+  expect(config.profile_for_mac("54:6C:0E:B8:37:E4").battery_handle == 0x000f, "battery handle config missing");
   expect(config.tcp.port == 7628, "TCP config was not loaded");
   expect(config.queues.database_capacity == 30000, "queue config was not loaded");
   expect(config.profile_for_mac("54:6c:0e:b9:1a:4c").name == "md9930", "MAC normalization failed");
   bool rejected = false;
   try { (void)config.profile_for_mac("00:00:00:00:00:00"); } catch (const std::out_of_range&) { rejected = true; }
   expect(rejected, "unknown MAC unexpectedly got a fallback profile");
+}
+
+void test_collection_schedule() {
+  iot::CollectionSchedule schedule;
+  schedule.enabled = true;
+  const auto utc = [](int hour, int minute, int second = 0) {
+    return std::chrono::system_clock::time_point{} +
+        std::chrono::hours(hour) + std::chrono::minutes(minute) + std::chrono::seconds(second);
+  };
+  expect(!schedule.allows(utc(5, 59, 59)), "must wait until Beijing 14:00");
+  expect(schedule.allows(utc(6, 0)), "start must be inclusive");
+  expect(schedule.allows(utc(8, 59, 59)), "must collect before stop");
+  expect(!schedule.allows(utc(9, 0)), "stop must be exclusive");
+  expect(schedule.allows(utc(30, 0)), "must repeat next day");
+  expect(schedule.allows(utc(7, 0)), "restart or clock correction inside window");
+  expect(!schedule.allows(utc(5, 0)), "backward clock correction outside window");
+  schedule.start_time = "22:00";
+  schedule.stop_time = "02:00";
+  expect(schedule.allows(utc(14, 0)), "overnight start");
+  expect(schedule.allows(utc(16, 0)), "Beijing midnight");
+  expect(schedule.allows(utc(17, 59, 59)), "overnight before stop");
+  expect(!schedule.allows(utc(18, 0)), "overnight stop");
+  expect(!schedule.allows(utc(13, 59, 59)), "overnight before start");
+  for (const auto* invalid : {"24:00", "14:60", "2:00", "14:00:00", "xx:yy", "02:00"}) {
+    schedule.start_time = invalid;
+    bool rejected = false;
+    try { schedule.validate(); } catch (const std::runtime_error&) { rejected = true; }
+    expect(rejected, "invalid or equal schedule times must fail");
+  }
+  schedule.enabled = false;
+  expect(schedule.allows(utc(0, 0)), "disabled schedule must preserve manual mode");
+  // Parsing tests must not depend on the operator's live schedule switch.
+  const auto fixture = std::filesystem::temp_directory_path() /
+      ("iot-schedule-config-" + std::to_string(getpid()) + ".yaml");
+  {
+    std::ofstream out(fixture);
+    out << "collection_schedule:\n  enabled: true\n  start_time: \"14:00\"\n  stop_time: \"17:00\"\n";
+  }
+  {
+    std::ofstream out(fixture, std::ios::app);
+    out << "sensor_types:\n  imu948:\n    notify_handle: 8\n    cccd_handle: 9\n    write_handle: 6\ndevices:\n  - mac: \"AA:BB:CC:DD:EE:FF\"\n    type: imu948\n";
+  }
+  const auto loaded = iot::AppConfig::load(fixture);
+  std::filesystem::remove(fixture);
+  expect(loaded.collection_schedule.enabled && loaded.collection_schedule.start_time == "14:00" &&
+         loaded.collection_schedule.stop_time == "17:00", "schedule config parsing failed");
 }
 
 void test_websocket_rejection() {
@@ -83,7 +132,12 @@ void test_decoder_resynchronization() {
   iot::protocol::StreamDecoder decoder({[&](const auto&) { ++count; }, {}, {}, [&](const auto&) { ++errors; }});
   iot::Bytes input{0xde, 0xad}; input.insert(input.end(), frame.begin(), frame.end());
   decoder.append(input);
-  expect(count == 1 && errors == 2, "stream did not resynchronize");
+  expect(count == 1 && errors == 1, "stream did not resynchronize");
+  iot::Bytes noise(4096, 0xdd);
+  noise.push_back(frame.front());
+  decoder.append(noise);
+  decoder.append(frame.data() + 1, frame.size() - 1);
+  expect(count == 2 && errors == 2, "noise recovery must preserve split headers without flooding logs");
 }
 
 void test_scan_frame() {
@@ -99,6 +153,14 @@ void test_scan_frame() {
                                         [](const auto& mac) { return mac == "CE:43:75:25:96:BF"; }, {}});
   decoder.append(frame);
   expect(reports == 1 && event.rssi == -42, "scan report decode failed");
+  // The gateway's MAC/RSSI-only mode has seven bytes per device.
+  frame.resize(26);
+  frame[4] = 3;
+  frame[6] = 21;
+  const auto short_checksum = iot::protocol::xor_checksum(frame.data() + 5, frame.size() - 5);
+  frame.push_back(short_checksum); frame.push_back(short_checksum);
+  decoder.append(frame);
+  expect(reports == 2 && event.mac == "CE:43:75:25:96:BF", "compact scan report decode failed");
 }
 
 void test_imu948_parser() {
@@ -119,13 +181,23 @@ void test_imu948_parser() {
 void test_md9930_parser() {
   iot::Bytes payload{0x01, 0x00, 0xfe, 0xff, 0x64, 0x00,
                      0x00, 0x0a, 0xff, 0xec, 0x00, 0x1e,
-                     0x34, 0x12, 0xa0, 0x86, 0x01, 0x00};
+                     0x12, 0x34, 0x00, 0x01, 0x86, 0xa0};
   const auto parsed = iot::protocol::Md9930Parser{}.parse("54:6C:0E:B9:1A:4C", payload);
   expect(parsed.has_value(), "MD9930 sample was rejected");
   const auto& sample = std::get<iot::SensorSample>(*parsed);
   expect(sample.counter == 0x1234 && sample.ticks == 100000, "MD9930 endian mismatch");
   expect(sample.sensor_uptime_ms == 1000, "MD9930 ticks conversion mismatch");
   expect(sample.gyro && std::abs(sample.gyro->x - 0.7) < 1e-10, "MD9930 gyro scale mismatch");
+  // Consecutive real V20 packets: a little-endian interpretation jumps by 256.
+  const auto first = iot::protocol::Md9930Parser{}.parse("54:6C:0E:B8:37:E4",
+      {0x3a,0,0xf8,0xff,0xfa,0xf7,0,0x1c,0xff,0xe0,0xff,0xf3,0x90,0xf5,0xa9,0x0e,0x8b,0xd8});
+  const auto next = iot::protocol::Md9930Parser{}.parse("54:6C:0E:B8:37:E4",
+      {0x27,0,0xfd,0,0x0f,0xf8,0,0x16,0xff,0xda,0xff,0xf3,0x90,0xf6,0xa9,0x0e,0x9f,0x96});
+  expect(first && next, "captured MD9930 packets rejected");
+  const auto& a = std::get<iot::SensorSample>(*first);
+  const auto& b = std::get<iot::SensorSample>(*next);
+  expect(*b.counter == *a.counter + 1 && *b.ticks - *a.ticks == 5054,
+         "captured MD9930 counter/timestamp byte order mismatch");
 }
 
 class FakeBackend final : public iot::services::InferenceBackend {
@@ -214,6 +286,7 @@ void test_inference_worker() {
 int main() {
   try {
     test_config();
+    test_collection_schedule();
     test_websocket_rejection();
     test_gateway_command_and_stream_decoder();
     test_decoder_resynchronization();

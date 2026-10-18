@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <csignal>
+#include <poll.h>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
@@ -13,6 +14,7 @@
 #include "iot/json.hpp"
 #include "iot/log.hpp"
 #include "iot/services/data_pipeline.hpp"
+#include "iot/services/health_monitor.hpp"
 #include "iot/services/database_writer.hpp"
 #include "iot/services/inference_worker.hpp"
 #include "iot/services/tcp_server.hpp"
@@ -23,11 +25,26 @@ volatile std::sig_atomic_t interrupted = 0;  // 信号标志位
 void signal_handler(int) { interrupted = true; }
 
 std::string device_list_json(const iot::AppConfig& config) {
+  /*发送websocket 初始化信息
+  {
+  "type": "device_list",
+  "devices": [
+    {
+      "mac": "AA:BB:CC:DD:EE:01",
+      "type": "sensor"
+    },
+    {
+      "mac": "AA:BB:CC:DD:EE:02",
+      "type": "switch"
+    }
+  ]
+  }
+  */
   std::ostringstream out;
   out << "{\"type\":\"device_list\",\"devices\":[";
   for (std::size_t i = 0; i < config.devices.size(); ++i) {
     if (i) out << ',';
-    out << "{\"mac\":\"" << iot::json_escape(config.devices[i].mac) << "\",\"type\":\""
+    out << "{\"id\":\"" << iot::json_escape(config.devices[i].id) << "\",\"mac\":\"" << iot::json_escape(config.devices[i].mac) << "\",\"type\":\""
         << iot::json_escape(config.devices[i].type) << "\"}";
   }
   out << "]}";
@@ -57,6 +74,9 @@ void print_command_menu() {
             << std::string(60, '=') << '\n'
             << "可用命令：\n"
             << "  list                         - 查看网关和设备状态\n"
+            << "  devices                      - 查看设备 ID 与 MAC 对照表\n"
+            << "  gateway-info <网关ID>         - 查询过滤、扫描和固件信息\n"
+            << "  scan-on <网关ID>              - 开启扫描输出并查询信息\n"
             << "  stats                        - 查看数据管道和队列状态\n"
             << "  connect <网关ID> <设备MAC>   - 连接指定传感器\n"
             << "    示例：connect 0 3F:B8:12:EE:3C:37\n"
@@ -118,18 +138,25 @@ int main(int argc, char** argv) {
     //对应 函数原型InferenceWorker(const InferenceConfig& config, PredictionHandler
     // prediction_handler,  std::size_t queue_capacity);
 
-    iot::services::DataPipeline pipeline(database, inference, websocket);
+    iot::services::HealthMonitor health(config);
+    iot::services::DataPipeline pipeline(database, inference, websocket, &health);
     iot::services::TcpServer tcp(config, pipeline);
 
     websocket.start();
     inference.start();
     tcp.start();
+    health.start();
     if (isatty(STDIN_FILENO)) {
       std::cout << "服务已启动。\n";
       print_command_menu();
       std::string line;
       while (!interrupted) {
         print_command_prompt();
+        // Wait with a timeout so SIGINT/SIGTERM can leave an idle interactive CLI.
+        // std::getline alone may restart its blocking read after the signal handler.
+        pollfd input_descriptor{STDIN_FILENO, POLLIN, 0};
+        while (!interrupted && poll(&input_descriptor, 1, 200) == 0) {}
+        if (interrupted) break;
         if (!std::getline(std::cin, line)) break;
 
         std::istringstream input(line);
@@ -153,11 +180,27 @@ int main(int argc, char** argv) {
           print_gateways(tcp);
           continue;
         }
+        if (command == "devices") {
+          std::cout << "ID\tMAC\t\t\t类型\n";
+          for (const auto& device : config.devices)
+            std::cout << (device.id.empty() ? "-" : device.id) << '\t' << device.mac << '\t' << device.type << '\n';
+          continue;
+        }
         if (command == "stats") {
           print_pipeline_stats(pipeline, database, inference, websocket);
           continue;
         }
 
+        if (command == "gateway-info" || command == "scan-on") {
+          std::string extra;
+          if (!(input >> gateway) || (input >> extra)) {
+            std::cerr << "用法：" << command << " <网关ID>\n";
+            continue;
+          }
+          if (!tcp.inspect_gateway(gateway, command == "scan-on"))
+            std::cerr << "网关不存在\n";
+          continue;
+        }
         if (command == "connect" || command == "disconnect") {
           if (!(input >> gateway >> mac)) {
             std::cerr << "命令格式不完整。\n"
@@ -191,6 +234,7 @@ int main(int argc, char** argv) {
       iot::log(iot::LogLevel::info, "running without interactive CLI; send SIGINT or SIGTERM to stop");
       while (!interrupted) std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
+    health.stop();
     tcp.stop();  //逐层 停止， 和 实例化  start 顺序相反。
     inference.stop();
     websocket.stop();

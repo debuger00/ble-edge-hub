@@ -13,6 +13,8 @@
 #include <cstring>
 #include <deque>
 #include <set>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -69,9 +71,16 @@ std::string peer_name(int socket) {
   return std::string(host) + ':' + service;  // eg  "192.168.1.20:54321"
 }
 
-std::uint16_t next_message_id() {
+std::uint16_t next_message_id(std::uint16_t count = 1) {
   static std::atomic<std::uint16_t> id{1};
-  return id.fetch_add(1, std::memory_order_relaxed);
+  return id.fetch_add(count, std::memory_order_relaxed);
+}
+
+std::string hex_bytes(const Bytes& bytes) {
+  std::ostringstream out;
+  for (const auto value : bytes)
+    out << std::hex << std::setfill('0') << std::setw(2) << static_cast<unsigned>(value);
+  return out.str();
 }
 
 std::string connection_name(ConnectionState state) {
@@ -134,15 +143,30 @@ class TcpServer::Session {
       socket_ = -1;
     }
   }
-  void queue(Bytes command) {  // 吧命令， 放入  outgoing_ 命令队列里面
+  void queue(Bytes command, bool requires_collection = true) {  // 吧命令， 放入  outgoing_ 命令队列里面
     std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (requires_collection && !config_.collection_schedule.allows(Clock::now())) return;
     if (active_) outgoing_.push_back(std::move(command));
   }
-  bool connect_device(const std::string& mac) {
+  bool connect_device(const std::string& mac, bool automatic = false) {
     try {
+      if (!config_.collection_schedule.allows(Clock::now())) {
+        log(LogLevel::warning, "connect rejected: outside Beijing collection schedule");
+        return false;
+      }
       const auto normalized = normalize_mac(mac);
       const auto& profile = config_.profile_for_mac(normalized);
-      queue(protocol::create_connect_command(config_.gateway_mac, next_message_id(), normalized, 30,
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (automatic && manually_paused_.count(normalized)) return false;
+        if (!automatic) manually_paused_.erase(normalized);
+      }
+      log(LogLevel::info, "connect requested gateway=" + std::to_string(id_) + " mac=" + normalized +
+          " automatic=" + (automatic ? "true" : "false") + " notify_handle=" +
+          std::to_string(profile.notify_handle) + " cccd_handle=" + std::to_string(profile.cccd_handle));
+      // KTBG602 0x10: 0 requests a long connection. A nonzero value limits
+      // both connection establishment and idle time after connection.
+      queue(protocol::create_connect_command(config_.gateway_mac, next_message_id(), normalized, 0,
                                              profile.notify_handle, profile.cccd_handle));
       return true;
     } catch (const std::exception& error) {
@@ -156,9 +180,23 @@ class TcpServer::Session {
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       reconnect_.erase(normalized);
+      manually_paused_.insert(normalized);
     }
-    queue(protocol::create_disconnect_command(config_.gateway_mac, next_message_id(), normalized));
+    queue(protocol::create_disconnect_command(config_.gateway_mac, next_message_id(), normalized), false);
     return true;
+  }
+  void inspect(bool enable_scan_output) {
+    if (enable_scan_output)
+      queue(protocol::create_command(config_.gateway_mac, 0xb0, next_message_id(), Bytes{1}), false);
+    // Read filters, scan settings and firmware; flush cached scan reports.
+    for (const std::uint8_t type : {0xaf, 0xbf, 0xe0})
+      queue(protocol::create_command(config_.gateway_mac, type, next_message_id(), {}), false);
+    for (const std::uint8_t type : {0x15, 0x31, 0x32})
+      queue(protocol::create_command(config_.gateway_mac, type, next_message_id(), Bytes{0}), false);
+    for (const auto& device : config_.devices)
+      queue(protocol::create_command(config_.gateway_mac, 0x13, next_message_id(),
+                                     protocol::parse_mac(device.mac)), false);
+    queue(protocol::create_command(config_.gateway_mac, 0x26, next_message_id(), {}), false);
   }
   GatewaySnapshot snapshot() const {
     GatewaySnapshot result;
@@ -187,6 +225,7 @@ class TcpServer::Session {
       const int status = poll(&descriptor, 1, 100);
       if (status < 0 && errno == EINTR) continue;  // 被信号打断，重试
       if (status < 0 || descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) break;  // 出错或连接关闭
+      update_schedule();
       if (descriptor.revents & POLLIN) {
         const auto count = recv(socket_, incoming.data(), incoming.size(), 0);
         if (count <= 0) break;                                              // 对端关闭连接
@@ -215,6 +254,49 @@ class TcpServer::Session {
     shutdown(socket_, SHUT_RDWR);
     log(LogLevel::warning, "gateway disconnected: " + remote_);
   }
+  // Run on the session thread so transitions precede both decoding and sending.
+  void update_schedule() {
+    if (!config_.collection_schedule.enabled) return;
+    const bool collecting = config_.collection_schedule.allows(Clock::now());
+    const auto now = std::chrono::steady_clock::now();
+    const bool changed = !scheduled_collecting_ || *scheduled_collecting_ != collecting;
+    if (changed) {
+      scheduled_collecting_ = collecting;
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        outgoing_.clear(); // Drop commands belonging to the previous period.
+      }
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        reconnect_.clear();
+        manually_paused_.clear();
+      }
+      log(LogLevel::info, "gateway " + std::to_string(id_) + " Beijing schedule " +
+          (collecting ? "START " : "STOP ") + config_.collection_schedule.start_time + "-" +
+          config_.collection_schedule.stop_time + " UTC+8");
+    }
+    if (!changed && now < next_schedule_retry_) return;
+    next_schedule_retry_ = now + std::chrono::seconds(config_.reconnect_interval_seconds);
+    for (const auto& device : config_.devices) {
+      if (!collecting) {
+        // Also disconnect devices whose connection event was missed (e.g. process restart).
+        queue(protocol::create_disconnect_command(config_.gateway_mac, next_message_id(), device.mac), false);
+        continue;
+      }
+      bool needs_connect;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const auto it = connected_.find(device.mac);
+        // Long connections retry inside the gateway. Do not restart its
+        // searching/connecting/notification-enabling state every schedule tick.
+        needs_connect = it == connected_.end() ||
+            (it->second.state == ConnectionState::unknown &&
+             Clock::now() - it->second.last_update >= std::chrono::seconds(30));
+      }
+      if (needs_connect) connect_device(device.mac, true);
+    }
+  }
+
   bool send_all(const Bytes& command) {
     auto* data = command.data();      // 当前待发送数据的位置
     auto remaining = command.size();  // 剩余待发送字节数
@@ -235,20 +317,55 @@ class TcpServer::Session {
   // 注意这里只看 frame.type 和 frame.payload，不使用 frame.gateway_mac（网关身份由 TCP 连接的 Session
   // 本身区分）。
   void on_frame(const protocol::GatewayFrame& frame) {
+    if (frame.type == 0xf0 && !frame.payload.empty() &&
+        (frame.payload[0] == 0xaf || frame.payload[0] == 0xbf || frame.payload[0] == 0xe0 ||
+         (frame.payload[0] == 0x13 && frame.payload.size() >= 8) ||
+         ((frame.payload[0] == 0x15 || frame.payload[0] == 0x31 || frame.payload[0] == 0x32) &&
+          frame.payload.size() >= 3 && frame.payload[1] == 2))) {
+      log(LogLevel::info, "gateway diagnostic reply gateway=" + std::to_string(id_) +
+          " payload=" + hex_bytes(frame.payload));
+      const auto word = [&](std::size_t offset) {
+        return std::to_string((frame.payload[offset] << 8U) | frame.payload[offset + 1]);
+      };
+      if (frame.payload[0] == 0x15 && frame.payload.size() == 11)
+        log(LogLevel::info, "gateway BLE preset reject_parameter_updates=" +
+            std::to_string(frame.payload[2]) + " interval_ms=" + word(3) + "-" + word(5) +
+            " latency=" + word(7) + " supervision_timeout_ms=" + word(9));
+      if (frame.payload[0] == 0x13 && frame.payload.size() >= 22)
+        log(LogLevel::info, "gateway device link mac=" + protocol::format_mac(frame.payload.data() + 1) +
+            " state=" + std::to_string(frame.payload[7]) + " interval_ms=" + word(14) + "-" + word(16) +
+            " latency=" + word(18) + " supervision_timeout_ms=" + word(20));
+      return;
+    }
     if (frame.type == 0x20)
       handle_device_data(frame.payload);  // 0x20 传感器数据帧 → 解析采样值并发布到 pipeline
     else if (frame.type == 0x21)
       handle_connection(frame.payload);  // 0x21 设备连接状态变化帧 → 更新 connected_ 状态表
+    else if (frame.type == 0x27 && frame.payload.size() >= 15 && frame.payload[6] == 0) {
+      const auto word = [&](std::size_t offset) {
+        return std::to_string((frame.payload[offset] << 8U) | frame.payload[offset + 1]);
+      };
+      log(LogLevel::info, "BLE connection parameters mac=" + protocol::format_mac(frame.payload.data()) +
+          " interval_ms=" + word(7) + "-" + word(9) + " latency=" + word(11) +
+          " supervision_timeout_ms=" + word(13));
+    } else if (frame.type == 0x27 && frame.payload.size() >= 8 && frame.payload[6] == 3)
+      log(LogLevel::warning, "device disconnected gateway=" + std::to_string(id_) +
+          " " + device_log_label(protocol::format_mac(frame.payload.data())) +
+          " hci_reason=0x" + hex_bytes(Bytes{frame.payload[7]}) +
+          (frame.payload[7] == 8 ? " (connection supervision timeout)" : ""));
     else if (frame.type == 0x22 && frame.payload.size() != 8)
       log(LogLevel::warning, "invalid heartbeat payload length");  // 0x22 心跳帧，payload 固定 8 字节
     else if (frame.type == 0xf0 && frame.payload.size() >= 2 && frame.payload[1] != 0)
       // 0xf0 命令执行结果帧：payload[0]=命令类型，payload[1]=错误码（0 成功，非 0 失败）
-      log(LogLevel::warning, "gateway command failed, type=" + std::to_string(frame.payload[0]));
+      log(LogLevel::warning, "gateway command failed, type=0x" + hex_bytes(Bytes{frame.payload[0]}) +
+          " status=" + std::to_string(frame.payload[1]) + " message_id=" + std::to_string(frame.message_id) +
+          " payload=" + hex_bytes(frame.payload));
     else if (frame.type != 0x22 && frame.type != 0x27 && frame.type != 0xf0)
       log(LogLevel::warning, "unsupported gateway frame type=" +
                                  std::to_string(frame.type));  // 0x27 是已知但无需处理的帧，其余为未知类型
   }
   void handle_device_data(const Bytes& payload) {
+    if (!config_.collection_schedule.allows(Clock::now())) return;
     if (payload.size() < 9) {
       log(LogLevel::warning, "device data payload is too short");
       return;
@@ -265,8 +382,36 @@ class TcpServer::Session {
     }
     const auto handle = static_cast<std::uint16_t>(payload[6] << 8U | payload[7]);
     const auto& profile = config_.profile_for_mac(mac);
-    if (handle != profile.notify_handle) log(LogLevel::debug, "data arrived on unexpected handle for " + mac);
+    if (profile.name == "md9930" && profile.battery_handle && handle == *profile.battery_handle) {
+      // Battery replies are separate from the FFF1 motion notifications.
+      if (length != 1 || payload[9] > 100) {
+        log(LogLevel::warning, "invalid battery reply " + device_log_label(mac) +
+            " payload=" + hex_bytes(Bytes(payload.begin() + 9, payload.end())));
+        return;
+      }
+      SensorStatus status;
+      status.mac = mac;
+      status.battery_level = payload[9];
+      pipeline_.publish(status);
+      log(LogLevel::debug, "battery received " + device_log_label(mac) +
+          " level=" + std::to_string(payload[9]) + "%");
+      return;
+    }
+    if (handle != profile.notify_handle) {
+      auto& count = unexpected_handles_[mac];
+      if (++count == 1 || count % 1000 == 0)
+        log(LogLevel::warning, "unexpected data handle mac=" + mac + " actual=" +
+            std::to_string(handle) + " expected=" + std::to_string(profile.notify_handle) +
+            " payload_bytes=" + std::to_string(length) + " count=" + std::to_string(count));
+    }
     const Bytes sensor_payload(payload.begin() + 9, payload.end());
+    // IMU948 command acknowledgements are valid one-byte notifications, not samples.
+    if (profile.name == "imu948" && sensor_payload.size() == 1 &&
+        (sensor_payload[0] == 0x29 || sensor_payload[0] == 0x12)) {
+      log(LogLevel::debug, "sensor command acknowledged " + device_log_label(mac) +
+          " command=0x" + hex_bytes(sensor_payload));
+      return;
+    }
     std::optional<protocol::SensorMessage> parsed;
     if (profile.name == "imu948")
       parsed = protocol::Imu948Parser{}.parse(mac, sensor_payload);
@@ -277,7 +422,11 @@ class TcpServer::Session {
       return;
     }
     if (!parsed) {
-      log(LogLevel::warning, "malformed sensor payload from " + mac);
+      auto& count = malformed_payloads_[mac];
+      if (++count == 1 || count % 1000 == 0)
+        log(LogLevel::warning, "malformed sensor payload from " + mac +
+            " handle=" + std::to_string(handle) + " payload=" + hex_bytes(sensor_payload) +
+            " count=" + std::to_string(count));
       return;
     }
     if (auto* sample = std::get_if<SensorSample>(&*parsed)) {
@@ -285,6 +434,11 @@ class TcpServer::Session {
     } else if (auto* status = std::get_if<SensorStatus>(&*parsed)) {
       pipeline_.publish(*status);
     }
+  }
+  std::string device_log_label(const std::string& mac) const {
+    for (const auto& device : config_.devices)
+      if (device.mac == mac) return "id=" + device.id + " mac=" + mac;
+    return "id=unknown mac=" + mac;
   }
   void handle_connection(const Bytes& payload) {
     if (payload.size() != 7) {
@@ -295,22 +449,40 @@ class TcpServer::Session {
     if (!config_.is_allowed_device(mac)) return;
     const auto raw = payload[6];
     const auto state = raw <= 6 ? static_cast<ConnectionState>(raw) : ConnectionState::unknown;
+    bool became_ready = false;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
+      const auto previous = connected_.find(mac);
+      became_ready = state == ConnectionState::ready &&
+          (previous == connected_.end() || previous->second.state != ConnectionState::ready);
       if (state == ConnectionState::disconnected)
         connected_.erase(mac);
       else
         connected_[mac] = ConnectedDevice{mac, state, Clock::now()};
-      if (state == ConnectionState::connected || state == ConnectionState::ready) reconnect_.insert(mac);
+      if ((state == ConnectionState::connected || state == ConnectionState::ready) &&
+          !manually_paused_.count(mac) && config_.collection_schedule.allows(Clock::now()))
+        reconnect_.insert(mac);
     }
-    log(LogLevel::info, mac + " connection state: " + connection_name(state));
-    if (state == ConnectionState::ready) configure_ready_device(mac);
+    log(LogLevel::info, device_log_label(mac) + " connection state: " + connection_name(state));
+    bool paused;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      paused = manually_paused_.count(mac) != 0;
+    }
+    if (!config_.collection_schedule.allows(Clock::now()) || paused) {
+      if (state != ConnectionState::disconnected && state != ConnectionState::disconnecting)
+        queue(protocol::create_disconnect_command(config_.gateway_mac, next_message_id(), mac), false);
+      return;
+    }
+    if (became_ready) configure_ready_device(mac);
   }
   void configure_ready_device(const std::string& mac) {
     const auto& profile = config_.profile_for_mac(mac);
-    auto id = next_message_id();
-    queue(protocol::create_send_data_command(config_.gateway_mac, id++, mac, profile.write_handle,
-                                             Bytes{0x29}));
+    // Both supported profiles emit two commands; reserve both IDs atomically.
+    auto id = next_message_id(2);
+    if (profile.name == "imu948")
+      queue(protocol::create_send_data_command(config_.gateway_mac, id++, mac, profile.write_handle,
+                                               Bytes{0x29}));
     if (profile.name == "md9930") {
       const auto command_handle = profile.command_handle.value_or(profile.write_handle);
       for (auto& command : protocol::create_md9930_frequency_commands(
@@ -318,33 +490,44 @@ class TcpServer::Session {
         queue(std::move(command));
     } else {
       queue(protocol::create_imu948_parameters_command(config_.gateway_mac, id, mac, profile.write_handle,
-                                                       profile.frequency_hz));
+                                                       profile.frequency_hz, profile.subscribe_tag));
     }
   }
   void query_batteries() {
+    if (!config_.collection_schedule.allows(Clock::now())) return;
     std::vector<std::string> devices;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
-      for (const auto& [mac, _] : connected_) devices.push_back(mac);
+      for (const auto& [mac, device] : connected_)
+        if (device.state == ConnectionState::ready) devices.push_back(mac);
     }
     for (const auto& mac : devices) {
       const auto& profile = config_.profile_for_mac(mac);
-      // IMU948 supports status tag 0x10. MD9930 battery is a GATT read and cannot use this write command.
+      // Query only ready devices, using each sensor family's protocol.
       if (profile.name == "imu948")
         queue(protocol::create_send_data_command(config_.gateway_mac, next_message_id(), mac,
                                                  profile.write_handle, Bytes{0x10}));
+      else if (profile.name == "md9930" && profile.battery_handle && *profile.battery_handle != 0)
+        queue(protocol::create_read_data_command(config_.gateway_mac, next_message_id(), mac,
+                                                 *profile.battery_handle));
     }
   }
   void reconnect_devices() {
+    if (config_.collection_schedule.enabled) return;
     std::vector<std::string> targets;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       for (const auto& mac : reconnect_)
         if (connected_.find(mac) == connected_.end()) targets.push_back(mac);
     }
-    for (const auto& mac : targets) connect_device(mac);
+    for (const auto& mac : targets) connect_device(mac, true);
   }
 
+  std::unordered_map<std::string, std::size_t> unexpected_handles_;
+  std::unordered_map<std::string, std::size_t> malformed_payloads_;
+  std::optional<bool> scheduled_collecting_;
+  std::chrono::steady_clock::time_point next_schedule_retry_{};
+  std::unordered_set<std::string> manually_paused_; // Protected by state_mutex_.
   std::uint64_t id_;                 // 会话唯一编号
   int socket_;                       // 与网关通信的 socket 文件描述符
   std::string remote_;               // 对端地址，如 "192.168.1.20:54321"
@@ -429,6 +612,14 @@ bool TcpServer::disconnect_device(std::uint64_t gateway_id, const std::string& m
   std::lock_guard<std::mutex> lock(sessions_mutex_);
   const auto found = sessions_.find(gateway_id);
   return found != sessions_.end() && found->second->disconnect_device(mac);
+}
+
+bool TcpServer::inspect_gateway(std::uint64_t gateway_id, bool enable_scan_output) {
+  std::lock_guard<std::mutex> lock(sessions_mutex_);
+  const auto found = sessions_.find(gateway_id);
+  if (found == sessions_.end()) return false;
+  found->second->inspect(enable_scan_output);
+  return true;
 }
 
 }  // namespace iot::services

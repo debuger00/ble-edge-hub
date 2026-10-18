@@ -17,6 +17,7 @@ class Reader {
   std::size_t remaining() const { return bytes_.size() - offset_; }
   std::uint8_t u8() { require(1); return bytes_[offset_++]; }
   std::uint16_t le16() { require(2); auto v = static_cast<std::uint16_t>(bytes_[offset_] | bytes_[offset_ + 1] << 8U); offset_ += 2; return v; }
+  std::uint16_t be16() { require(2); auto v = static_cast<std::uint16_t>(bytes_[offset_] << 8U | bytes_[offset_ + 1]); offset_ += 2; return v; }
   std::int16_t sle16() { auto raw = le16(); std::int16_t value{}; std::memcpy(&value, &raw, sizeof(value)); return value; }
   std::int16_t sbe16() {
     require(2);
@@ -30,6 +31,14 @@ class Reader {
                    static_cast<std::uint32_t>(bytes_[offset_ + 1]) << 8U |
                    static_cast<std::uint32_t>(bytes_[offset_ + 2]) << 16U |
                    static_cast<std::uint32_t>(bytes_[offset_ + 3]) << 24U;
+    offset_ += 4; return v;
+  }
+  std::uint32_t be32() {
+    require(4);
+    const auto v = static_cast<std::uint32_t>(bytes_[offset_]) << 24U |
+                   static_cast<std::uint32_t>(bytes_[offset_ + 1]) << 16U |
+                   static_cast<std::uint32_t>(bytes_[offset_ + 2]) << 8U |
+                   static_cast<std::uint32_t>(bytes_[offset_ + 3]);
     offset_ += 4; return v;
   }
   void skip(std::size_t n) { require(n); offset_ += n; }
@@ -97,8 +106,10 @@ std::optional<SensorMessage> Md9930Parser::parse(const std::string& mac, const B
     sample.accel = vec_sle16(reader, kAccelScale);
     sample.gyro = Vec3{reader.sbe16() * kMdGyroScale, reader.sbe16() * kMdGyroScale,
                        reader.sbe16() * kMdGyroScale};
-    sample.counter = reader.le16();
-    if (reader.remaining() >= 4) sample.ticks = reader.le32();
+    // MD9930 V20 captures: counter 90f5 -> 90f6 and ticks a90e8bd8 -> a90e9f96.
+    // Only acceleration is little-endian; counter and ticks are big-endian.
+    sample.counter = reader.be16();
+    if (reader.remaining() >= 4) sample.ticks = reader.be32();
     sample.sensor_uptime_ms = sample.ticks ? std::optional<std::uint64_t>(*sample.ticks / 100U) : std::nullopt;
     return SensorMessage{std::move(sample)};
   } catch (const std::out_of_range&) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -17,15 +18,18 @@ struct EndpointConfig {
 struct SensorProfile {
   std::string name;
   int frequency_hz{25};
+  std::uint16_t subscribe_tag{0x0fff}; // IMU948 fields; legacy default when omitted.
   std::uint16_t notify_handle{};
   std::uint16_t cccd_handle{};
   std::uint16_t write_handle{};
   std::optional<std::uint16_t> command_handle;
+  std::optional<std::uint16_t> battery_handle; // MD9930 FFF2 read value handle.
 };
 
 struct DeviceConfig {
   std::string mac;
   std::string type;
+  std::string id;
 };
 
 struct InferenceConfig {
@@ -41,6 +45,29 @@ struct QueueConfig {
   std::size_t websocket_capacity{4096};
 };
 
+struct CollectionSchedule {
+  bool enabled{false};
+  std::string start_time{"14:00"};
+  std::string stop_time{"17:00"};
+
+  void validate() const;
+  bool allows(std::chrono::system_clock::time_point now) const;
+};
+
+struct AlertConfig {
+  bool enabled{false};
+  int timeout_seconds{300};
+  int retry_interval_seconds{60};
+  int smtp_timeout_seconds{15};
+  std::string smtp_host;
+  int smtp_port{465};
+  std::string smtp_security{"ssl"}; // ssl, starttls, none
+  std::string smtp_username;
+  std::string smtp_password;
+  std::string from_email;
+  std::string to_email;
+};
+
 struct AppConfig {
   EndpointConfig tcp{"0.0.0.0", 7628};
   EndpointConfig websocket{"0.0.0.0", 8765};
@@ -51,6 +78,8 @@ struct AppConfig {
   std::filesystem::path data_dir{"data"};
   InferenceConfig inference;
   QueueConfig queues;
+  CollectionSchedule collection_schedule;
+  AlertConfig alerts;
   std::unordered_map<std::string, SensorProfile> sensor_types;
   std::vector<DeviceConfig> devices;
 

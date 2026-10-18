@@ -12,6 +12,12 @@ let displaySampleHz = 0; // 0: retain every received sample; 10: display-only do
 const ACTION_WINDOW_MS = 20000;           // action 时间窗口 (20秒)
 
 const discoveredDevices = new Set();
+const deviceMetadata = new Map();
+const deviceButtons = new Map();
+function deviceLabel(mac) {
+    const device = deviceMetadata.get(mac);
+    return device ? [device.id, device.type, mac].filter(Boolean).join(" · ") : mac;
+}
 let currentDeviceMac = null;
 let selectedSampleCount = 0;
 let selectedLastSampleAt = 0;
@@ -19,7 +25,24 @@ let confirmedSubscriptionMac = null;
 
 const OFFLINE_THRESHOLD_MS = 5000; // 判定离线的阈值：5000ms未收到数据
 const deviceLastSeen = new Map();  // 记录设备最后活跃的绝对时间 (Space Complexity: O(N))
-const deviceBatteryMap = new Map(); // 缓存电量与时间戳数据 (Space Complexity: O(N))
+const BATTERY_STORAGE_KEY = 'ble-iot-last-battery-v1';
+function validBattery(value) {
+    return value && Number.isFinite(value.level) && value.level >= 0 && value.level <= 100 &&
+        Number.isFinite(value.timestamp) && Number.isFinite(new Date(value.timestamp).getTime());
+}
+function loadBatteryHistory() {
+    try {
+        const entries = JSON.parse(window.localStorage.getItem(BATTERY_STORAGE_KEY) || '[]');
+        return new Map(entries.filter(entry => Array.isArray(entry) && entry.length === 2 &&
+            typeof entry[0] === 'string' && /^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(entry[0]) && validBattery(entry[1])));
+    } catch (_) { return new Map(); }
+}
+const deviceBatteryMap = loadBatteryHistory();
+deviceBatteryMap.forEach((_, mac) => discoveredDevices.add(mac));
+function saveBatteryHistory() {
+    try { window.localStorage.setItem(BATTERY_STORAGE_KEY, JSON.stringify([...deviceBatteryMap])); }
+    catch (_) { /* Browser storage may be unavailable; retain this session's values. */ }
+} // 缓存电量与时间戳数据 (Space Complexity: O(N))
 
 // DOM 引用
 const statusElement = document.getElementById('status');
@@ -112,34 +135,6 @@ const actionChart = new Chart(actionCtx, {
     }
 });
 
-const sensorTimeCtx = document.getElementById('sensorTimeChart').getContext('2d');
-const sensorTimeChart = new Chart(sensorTimeCtx, {
-    type: 'line',
-    data: {
-        datasets: [
-            { label: 'Accel X (Device Time)', borderColor: 'rgb(75, 192, 192)', data: [], tension: 0.1, pointRadius: 2 },
-            { label: 'Accel Y (Device Time)', borderColor: 'rgb(255, 99, 132)', data: [], tension: 0.1, pointRadius: 2 },
-            { label: 'Accel Z (Device Time)', borderColor: 'rgb(54, 162, 235)', data: [], tension: 0.1, pointRadius: 2 }
-        ]
-    },
-    options: {
-        scales: {
-            x: {
-                type: 'linear',
-                title: { display: true, text: 'Sensor Uptime (ms)' },
-                ticks: { callback: function (value) { return value; } }
-            },
-            y: { title: { display: true, text: 'm/s²' } }
-        },
-        animation: false,
-        plugins: {
-            tooltip: {
-                callbacks: { title: (context) => `Uptime: ${context[0].parsed.x} ms` }
-            }
-        }
-    }
-});
-
 // =======================
 // 3. UI 渲染与状态轮询 (UI Rendering & Polling)
 // =======================
@@ -149,6 +144,7 @@ const sensorTimeChart = new Chart(sensorTimeCtx, {
  */
 function renderDeviceSelector() {
     deviceSelectorElement.innerHTML = '';
+    deviceButtons.clear();
 
     discoveredDevices.forEach(mac => {
         const button = document.createElement('button');
@@ -157,26 +153,27 @@ function renderDeviceSelector() {
 
         // 从缓存中提取电量与时间上下文
         const batteryData = deviceBatteryMap.get(mac);
-        const battDisplay = batteryData ? 'flex' : 'none';
         const battLevel = batteryData ? batteryData.level : '--';
-        const battTime = batteryData ? new Date(batteryData.timestamp).toLocaleTimeString() : '--:--:--';
+        const battTime = batteryData ? new Date(batteryData.timestamp).toLocaleString() : '暂无记录';
 
         // 构造双行布局的按钮内部 DOM (第一行：MAC + 在线状态；第二行：电量 + 时间)
         button.innerHTML = `
             <div class="is-flex is-align-items-center w-100">
-                <span class="has-text-weight-bold">${mac}</span> 
-                <span class="tag status-tag is-light is-rounded ml-2">Offline</span>
+                <span class="has-text-weight-bold"></span>
+                <span class="tag status-tag is-light is-rounded ml-2">离线</span>
             </div>
-            <div class="battery-container is-flex is-align-items-center mt-1" style="display: ${battDisplay}; font-size: 0.75rem;">
+            <div class="battery-container is-flex is-align-items-center mt-1" style="font-size: 0.75rem;">
                 <span class="tag is-info is-light is-small">
                     🔋 <strong class="batt-level ml-1">${battLevel}%</strong>
                 </span>
                 <span class="has-text-grey ml-2">
-                    ⏱️ <span class="batt-time">${battTime}</span>
+                    最近更新：<span class="batt-time">${battTime}</span>
                 </span>
             </div>
         `;
 
+        button.querySelector('.has-text-weight-bold').textContent = deviceLabel(mac);
+        deviceButtons.set(mac, button);
         if (mac === currentDeviceMac) {
             button.classList.add('is-primary');
         }
@@ -184,7 +181,7 @@ function renderDeviceSelector() {
         button.onclick = () => {
             if (currentDeviceMac !== mac) {
                 currentDeviceMac = mac;
-                currentDeviceMacElement.textContent = mac;
+                currentDeviceMacElement.textContent = deviceLabel(mac);
 
                 resetCharts();
                 subscribeCurrentDevice();
@@ -201,7 +198,7 @@ function resetCharts() {
     selectedSampleCount = 0;
     selectedLastSampleAt = 0;
     confirmedSubscriptionMac = null;
-    [chart, sensorTimeChart, actionChart].forEach(item => {
+    [chart, actionChart].forEach(item => {
         item.data.datasets.forEach(dataset => { dataset.data = []; });
         delete item.options.scales.x.min;
         delete item.options.scales.x.max;
@@ -243,7 +240,7 @@ function updateWaveformStatus() {
     } else if (selectedLastSampleAt && Date.now() - selectedLastSampleAt <= OFFLINE_THRESHOLD_MS) {
         waveformStatusElement.textContent = `正在接收 ${currentDeviceMac}：本次已收到 ${selectedSampleCount} 个波形采样。`;
     } else if (confirmedSubscriptionMac === currentDeviceMac) {
-        waveformStatusElement.textContent = `已订阅 ${currentDeviceMac}，等待采样；可选择 Online 设备或检查传感器连接。`;
+        waveformStatusElement.textContent = `已订阅 ${currentDeviceMac}，等待采样；可选择在线设备或检查传感器连接。`;
     } else {
         waveformStatusElement.textContent = `等待 ${currentDeviceMac} 的订阅确认；若持续无数据，请确认后端已更新。`;
     }
@@ -269,13 +266,13 @@ function updateDeviceStatusUI() {
         if (!tag) return;
 
         if (isOffline) {
-            button.style.opacity = '0.6';
+            button.style.opacity = '1.0';
             tag.className = 'tag status-tag is-light is-rounded ml-2';
-            tag.textContent = 'Offline';
+            tag.textContent = '离线';
         } else {
             button.style.opacity = '1.0';
             tag.className = 'tag status-tag is-success is-rounded ml-2';
-            tag.textContent = 'Online';
+            tag.textContent = '在线';
         }
     });
 }
@@ -296,9 +293,9 @@ let reconnectTimer = null;
 
 function connectWebSocket() {
     const wsHost = window.location.hostname;
-    const wsPort = new URLSearchParams(window.location.search).get('wsPort') || 8765;
+    const wsPort = new URLSearchParams(window.location.search).get('wsPort');
     const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${wsScheme}://${wsHost}:${wsPort}`;
+    const wsUrl = wsPort ? `${wsScheme}://${wsHost}:${wsPort}` : `${wsScheme}://${window.location.host}/ws`;
 
     statusElement.textContent = '正在连接服务器...';
     statusElement.className = 'subtitle is-warning';
@@ -323,11 +320,16 @@ function connectWebSocket() {
             // 设备列表初始化消息
             if (message.type === 'device_list') {
                 discoveredDevices.clear();
-                (message.devices || []).forEach(d => discoveredDevices.add(d.mac));
+                deviceMetadata.clear();
+                (message.devices || []).forEach(d => {
+                    discoveredDevices.add(d.mac);
+                    deviceMetadata.set(d.mac, d);
+                });
+                updateDownloadDevices();
                 if (!discoveredDevices.has(currentDeviceMac)) {
                     currentDeviceMac = discoveredDevices.values().next().value || null;
                 }
-                currentDeviceMacElement.textContent = currentDeviceMac || '--';
+                currentDeviceMacElement.textContent = currentDeviceMac ? deviceLabel(currentDeviceMac) : '--';
                 resetCharts();
                 renderDeviceSelector();
                 subscribeCurrentDevice(); // Also restores the selection after reconnect.
@@ -359,10 +361,19 @@ function connectWebSocket() {
 
             // --- 核心逻辑：电量消息分支提取与局部 O(1) DOM 更新 ---
             if (message.type === 'battery') {
-                deviceBatteryMap.set(mac, { level: message.level, timestamp: now });
+                const latest = { level: message.level, timestamp: now };
+                if (!mac || !validBattery(latest)) return;
+                const previous = deviceBatteryMap.get(mac);
+                if (previous && previous.timestamp > now) return;
+                deviceBatteryMap.set(mac, latest);
+                saveBatteryHistory();
+                if (!discoveredDevices.has(mac)) {
+                    discoveredDevices.add(mac);
+                    renderDeviceSelector();
+                }
 
                 // 定位特定的 DOM 节点更新文本，避免触发页面重排 (Reflow)
-                const btn = document.querySelector(`button[data-mac="${mac}"]`);
+                const btn = deviceButtons.get(mac);
                 if (btn) {
                     const battContainer = btn.querySelector('.battery-container');
                     const battLevelSpan = btn.querySelector('.batt-level');
@@ -371,7 +382,7 @@ function connectWebSocket() {
                     if (battContainer && battLevelSpan && battTimeSpan) {
                         battContainer.style.display = 'flex';
                         battLevelSpan.textContent = `${message.level}%`;
-                        battTimeSpan.textContent = new Date(now).toLocaleTimeString();
+                        battTimeSpan.textContent = new Date(now).toLocaleString();
                     }
                 }
                 return; // Early return，终止执行后续高频渲染逻辑
@@ -383,7 +394,7 @@ function connectWebSocket() {
                 renderDeviceSelector();
                 if (!currentDeviceMac) {
                     currentDeviceMac = mac;
-                    currentDeviceMacElement.textContent = mac;
+                    currentDeviceMacElement.textContent = deviceLabel(mac);
                     resetCharts();
                     subscribeCurrentDevice();
                     renderDeviceSelector();
@@ -419,33 +430,6 @@ function connectWebSocket() {
                 chart.options.scales.x.max = now;
                 dirtyCharts.add(chart);
 
-                const sensorTime = message.sensor_uptime;
-                if (Number.isFinite(sensorTime)) {
-                    const previous = sensorTimeChart.data.datasets[0].data;
-                    if (previous.length && sensorTime < previous[previous.length - 1].x) {
-                        sensorTimeChart.data.datasets.forEach(dataset => { dataset.data = []; });
-                    }
-                    const d1 = sensorTimeChart.data.datasets[0].data;
-                    const d2 = sensorTimeChart.data.datasets[1].data;
-                    const d3 = sensorTimeChart.data.datasets[2].data;
-
-                    d1.push({ x: sensorTime, y: accel.x });
-                    d2.push({ x: sensorTime, y: accel.y });
-                    d3.push({ x: sensorTime, y: accel.z });
-
-                    if (d1.length > MAX_DATA_POINTS) d1.shift();
-                    if (d2.length > MAX_DATA_POINTS) d2.shift();
-                    if (d3.length > MAX_DATA_POINTS) d3.shift();
-
-                    sensorTimeChart.data.datasets.forEach(dataset => {
-                        while (dataset.data.length && dataset.data[0].x < sensorTime - SAMPLE_WINDOW_MS) {
-                            dataset.data.shift();
-                        }
-                    });
-                    sensorTimeChart.options.scales.x.min = Math.max(0, sensorTime - SAMPLE_WINDOW_MS);
-                    sensorTimeChart.options.scales.x.max = Math.max(1, sensorTime);
-                    dirtyCharts.add(sensorTimeChart);
-                }
             }
 
             // 行为推断时序渲染逻辑
@@ -495,9 +479,65 @@ function connectWebSocket() {
     };
 
     socket.onerror = () => {
-        statusElement.textContent = '连接错误，请检查网络堆栈。';
+        statusElement.textContent = '连接异常，正在尝试恢复，请检查网络或服务状态。';
         statusElement.className = 'subtitle is-danger';
     };
 }
 
 connectWebSocket();
+
+// Downloads use normal navigation so large exports never accumulate in JS memory.
+function updateDownloadDevices() {
+    const select = document.getElementById('download-device');
+    if (!select) return;
+    const previous = select.value;
+    select.innerHTML = '';
+    const all = document.createElement('option');
+    all.value = '';
+    all.textContent = '全部设备';
+    select.appendChild(all);
+    deviceMetadata.forEach((device, mac) => {
+        const option = document.createElement('option');
+        option.value = mac;
+        option.textContent = deviceLabel(mac);
+        select.appendChild(option);
+    });
+    select.value = deviceMetadata.has(previous) ? previous : '';
+}
+
+async function loadDownloadDates() {
+    const select = document.getElementById('download-date');
+    const status = document.getElementById('download-status');
+    const button = document.getElementById('download-button');
+    if (!select || !status || !button) return;
+    button.disabled = true;
+    status.textContent = '正在读取可下载日期…';
+    try {
+        const response = await fetch('/api/dates', { cache: 'no-store' });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const data = await response.json();
+        select.innerHTML = '';
+        data.dates.forEach(date => {
+            const option = document.createElement('option');
+            option.value = date;
+            option.textContent = date.replaceAll('_', '-');
+            select.appendChild(option);
+        });
+        button.disabled = !data.dates.length;
+        status.textContent = data.dates.length ? 'CSV 支持按设备导出；SQLite 下载当天全部设备的完整快照。' : '暂无已保存的数据。';
+    } catch (error) {
+        status.textContent = '无法读取下载列表，请检查下载服务和 Nginx 配置。';
+    }
+}
+
+const downloadForm = document.getElementById('download-form');
+if (downloadForm) {
+    const format = document.getElementById('download-format');
+    const device = document.getElementById('download-device');
+    format.onchange = () => { device.disabled = format.value === 'sqlite'; };
+    downloadForm.onsubmit = () => {
+        document.getElementById('download-status').textContent = '正在生成下载文件，请稍候；大文件可能需要几分钟。';
+    };
+    document.getElementById('download-refresh').onclick = loadDownloadDates;
+    loadDownloadDates();
+}

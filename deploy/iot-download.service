@@ -1,0 +1,17 @@
+[Unit]
+Description=IoT data download API
+After=network.target
+
+[Service]
+Type=simple
+User=aiam
+WorkingDirectory=/home/aiam/opt/002demoCpp
+ExecStart=/usr/bin/python3 /home/aiam/opt/002demoCpp/scripts/download_server.py --data-dir /home/aiam/opt/002demoCpp/data
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
