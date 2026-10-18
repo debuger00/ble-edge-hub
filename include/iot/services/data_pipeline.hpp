@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <cstddef>
+#include <mutex>
+#include <unordered_map>
 
 #include "iot/domain.hpp"
 
@@ -15,6 +17,11 @@ class HealthMonitor;
 // Fans each parsed sensor event out to independent downstream queues. All
 // methods are intentionally non-blocking so a slow disk, GPU, or browser does
 // not stop the TCP receive loop.
+struct BatterySnapshot {
+  unsigned level{};
+  Clock::time_point received_at;
+};
+
 class DataPipeline {
  public:
   DataPipeline(DatabaseWriter& database, InferenceWorker& inference, WebSocketServer& websocket,
@@ -22,6 +29,7 @@ class DataPipeline {
 
   void publish(SensorSample sample);
   void publish(const SensorStatus& status);
+  std::unordered_map<std::string, BatterySnapshot> batteries() const;
 
   std::size_t database_dropped() const noexcept { return database_dropped_; }
   std::size_t inference_rejected() const noexcept { return inference_rejected_; }
@@ -30,6 +38,8 @@ class DataPipeline {
  private:
   static void report_drop(const char* channel, std::size_t count);
 
+  mutable std::mutex battery_mutex_;
+  std::unordered_map<std::string, BatterySnapshot> batteries_;
   HealthMonitor* health_;
   DatabaseWriter& database_;
   InferenceWorker& inference_;

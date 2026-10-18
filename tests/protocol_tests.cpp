@@ -40,6 +40,7 @@ void test_gateway_command_and_stream_decoder() {
 void test_config() {
   const auto config = iot::AppConfig::load(std::filesystem::path(IOT_TEST_SOURCE_DIR) / "config/config.yaml");
   expect(config.profile_for_mac("54:6C:0E:B8:37:E4").battery_handle == 0x000f, "battery handle config missing");
+  expect(!config.devices[2].enabled, "disabled device config ignored");
   expect(config.tcp.port == 7628, "TCP config was not loaded");
   expect(config.queues.database_capacity == 30000, "queue config was not loaded");
   expect(config.profile_for_mac("54:6c:0e:b9:1a:4c").name == "md9930", "MAC normalization failed");

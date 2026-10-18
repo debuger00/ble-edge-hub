@@ -156,12 +156,17 @@ class TcpServer::Session {
       }
       const auto normalized = normalize_mac(mac);
       const auto& profile = config_.profile_for_mac(normalized);
+      for (const auto& device : config_.devices)
+        if (device.mac == normalized && !device.enabled) {
+          log(LogLevel::warning, "connect rejected: disabled " + device_log_label(normalized));
+          return false;
+        }
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (automatic && manually_paused_.count(normalized)) return false;
         if (!automatic) manually_paused_.erase(normalized);
       }
-      log(LogLevel::info, "connect requested gateway=" + std::to_string(id_) + " mac=" + normalized +
+      log(LogLevel::info, "connect requested gateway=" + std::to_string(id_) + " " + device_log_label(normalized) +
           " automatic=" + (automatic ? "true" : "false") + " notify_handle=" +
           std::to_string(profile.notify_handle) + " cccd_handle=" + std::to_string(profile.cccd_handle));
       // KTBG602 0x10: 0 requests a long connection. A nonzero value limits
@@ -278,8 +283,8 @@ class TcpServer::Session {
     if (!changed && now < next_schedule_retry_) return;
     next_schedule_retry_ = now + std::chrono::seconds(config_.reconnect_interval_seconds);
     for (const auto& device : config_.devices) {
+      if (!device.enabled) continue;
       if (!collecting) {
-        // Also disconnect devices whose connection event was missed (e.g. process restart).
         queue(protocol::create_disconnect_command(config_.gateway_mac, next_message_id(), device.mac), false);
         continue;
       }
@@ -287,8 +292,7 @@ class TcpServer::Session {
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
         const auto it = connected_.find(device.mac);
-        // Long connections retry inside the gateway. Do not restart its
-        // searching/connecting/notification-enabling state every schedule tick.
+        // The gateway owns retries for active long-connection requests.
         needs_connect = it == connected_.end() ||
             (it->second.state == ConnectionState::unknown &&
              Clock::now() - it->second.last_update >= std::chrono::seconds(30));
@@ -332,7 +336,7 @@ class TcpServer::Session {
             std::to_string(frame.payload[2]) + " interval_ms=" + word(3) + "-" + word(5) +
             " latency=" + word(7) + " supervision_timeout_ms=" + word(9));
       if (frame.payload[0] == 0x13 && frame.payload.size() >= 22)
-        log(LogLevel::info, "gateway device link mac=" + protocol::format_mac(frame.payload.data() + 1) +
+        log(LogLevel::info, "gateway device link " + device_log_label(protocol::format_mac(frame.payload.data() + 1)) +
             " state=" + std::to_string(frame.payload[7]) + " interval_ms=" + word(14) + "-" + word(16) +
             " latency=" + word(18) + " supervision_timeout_ms=" + word(20));
       return;
@@ -345,7 +349,7 @@ class TcpServer::Session {
       const auto word = [&](std::size_t offset) {
         return std::to_string((frame.payload[offset] << 8U) | frame.payload[offset + 1]);
       };
-      log(LogLevel::info, "BLE connection parameters mac=" + protocol::format_mac(frame.payload.data()) +
+      log(LogLevel::info, "BLE connection parameters " + device_log_label(protocol::format_mac(frame.payload.data())) +
           " interval_ms=" + word(7) + "-" + word(9) + " latency=" + word(11) +
           " supervision_timeout_ms=" + word(13));
     } else if (frame.type == 0x27 && frame.payload.size() >= 8 && frame.payload[6] == 3)
@@ -400,7 +404,7 @@ class TcpServer::Session {
     if (handle != profile.notify_handle) {
       auto& count = unexpected_handles_[mac];
       if (++count == 1 || count % 1000 == 0)
-        log(LogLevel::warning, "unexpected data handle mac=" + mac + " actual=" +
+        log(LogLevel::warning, "unexpected data handle " + device_log_label(mac) + " actual=" +
             std::to_string(handle) + " expected=" + std::to_string(profile.notify_handle) +
             " payload_bytes=" + std::to_string(length) + " count=" + std::to_string(count));
     }
@@ -424,7 +428,7 @@ class TcpServer::Session {
     if (!parsed) {
       auto& count = malformed_payloads_[mac];
       if (++count == 1 || count % 1000 == 0)
-        log(LogLevel::warning, "malformed sensor payload from " + mac +
+        log(LogLevel::warning, "malformed sensor payload from " + device_log_label(mac) +
             " handle=" + std::to_string(handle) + " payload=" + hex_bytes(sensor_payload) +
             " count=" + std::to_string(count));
       return;
@@ -464,6 +468,8 @@ class TcpServer::Session {
         reconnect_.insert(mac);
     }
     log(LogLevel::info, device_log_label(mac) + " connection state: " + connection_name(state));
+    for (const auto& device : config_.devices)
+      if (device.mac == mac && !device.enabled) return;
     bool paused;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -502,6 +508,9 @@ class TcpServer::Session {
         if (device.state == ConnectionState::ready) devices.push_back(mac);
     }
     for (const auto& mac : devices) {
+      const auto enabled = std::find_if(config_.devices.begin(), config_.devices.end(),
+          [&](const auto& device) { return device.mac == mac && device.enabled; });
+      if (enabled == config_.devices.end()) continue;
       const auto& profile = config_.profile_for_mac(mac);
       // Query only ready devices, using each sensor family's protocol.
       if (profile.name == "imu948")

@@ -8,7 +8,7 @@ const MAX_DATA_POINTS = 750;
 const SAMPLE_WINDOW_MS = 30000;
 const RENDER_INTERVAL_MS = 1000 / 15;
 const dirtyCharts = new Set();
-let displaySampleHz = 0; // 0: retain every received sample; 10: display-only downsampling.
+let displaySampleHz = 10; // 0: retain every received sample; 10: display-only downsampling.
 const ACTION_WINDOW_MS = 20000;           // action 时间窗口 (20秒)
 
 const discoveredDevices = new Set();
@@ -225,6 +225,7 @@ function subscribeCurrentDevice() {
 // A cached older HTML page may not contain the new optional display control.
 // It must still initialize the socket and subscribe successfully.
 if (displayRateElement) {
+    displayRateElement.value = String(displaySampleHz);
     displayRateElement.onchange = () => {
         displaySampleHz = Number(displayRateElement.value) === 10 ? 10 : 0;
         subscribeCurrentDevice();

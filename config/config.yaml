@@ -49,13 +49,13 @@ queues:
 
 sensor_types:
   imu948:
-    frequency: 25
+    frequency: 10
     subscribe_tag: 0x000F  # 保留加速度/原始加速度/角速度/磁场，减少未使用字段传输
     notify_handle: 0x0008
     cccd_handle: 0x0009
     write_handle: 0x0006
   md9930:
-    frequency: 25
+    frequency: 10
     notify_handle: 0x000B  # 实测 MD9930 FFF1 通知数据的 value handle
     cccd_handle: 0x000C
     write_handle: 0x0015  # GATT 实测 FFF4 value handle；0x0014 是声明句柄

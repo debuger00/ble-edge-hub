@@ -44,6 +44,7 @@ std::vector<DeviceAlert> HealthTracker::due(Clock::time_point wall, Steady::time
   std::vector<DeviceAlert> result;
   if (!reconcile(wall, monotonic)) return result;
   for (const auto& device : config_.devices) {
+    if (!device.enabled) continue;
     auto& state = states_.at(device.mac);
     const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(monotonic - state.last).count();
     if (state.reported || monotonic < state.retry || elapsed < config_.alerts.timeout_seconds) continue;

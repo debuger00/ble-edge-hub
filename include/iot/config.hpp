@@ -30,6 +30,7 @@ struct DeviceConfig {
   std::string mac;
   std::string type;
   std::string id;
+  bool enabled{true};
 };
 
 struct InferenceConfig {

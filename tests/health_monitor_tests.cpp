@@ -46,6 +46,13 @@ void test_tracker() {
   tracker.sample(config.devices[1].mac, wall + seconds(1101), steady + seconds(1101));
   expect(tracker.due(wall + seconds(1102), steady + seconds(1102)).size() == 1, "stale delivery acknowledgement");
 
+  auto disabled_config = config;
+  disabled_config.devices[0].enabled = false;
+  HealthTracker disabled_tracker(disabled_config);
+  disabled_tracker.due(wall, steady);
+  const auto disabled_alerts = disabled_tracker.due(wall + seconds(301), steady + seconds(301));
+  expect(disabled_alerts.size() == 1 && disabled_alerts[0].id == "002", "disabled device must not alert");
+
   HealthTracker clock_tracker(config);
   clock_tracker.due(wall, steady);
   expect(clock_tracker.due(wall + hours(10), steady + seconds(299)).empty(), "wall jump must not accelerate timeout");
@@ -76,6 +83,7 @@ void test_config_validation() {
     return false;
   };
   auto bad = config;
+  bad = config;
   bad.devices[1].id = bad.devices[0].id;
   expect(rejects(bad), "duplicate IDs");
   bad = config; bad.devices[0].id.clear(); expect(rejects(bad), "missing IDs");

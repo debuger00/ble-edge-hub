@@ -181,7 +181,8 @@ sensor_types:
     command_handle: 18
     battery_handle: 15
 devices:
-  - mac: "AA:BB:CC:DD:EE:FF"
+  - id: "005"
+    mac: "AA:BB:CC:DD:EE:FF"
     type: {device_type}
 ''')
         master, slave = pty.openpty()
@@ -225,6 +226,26 @@ devices:
                     else:
                         assert battery[24:-1] == b'\x10', 'ready device battery was not queried' 
                     assert battery[10:12] not in ids, 'battery command ID reused'
+                    if device_type == "md9930":
+                        # Exercise CLI ID resolution and cached battery display after disconnect.
+                        os.write(master, b'disconnect 0 5\n')
+                        while receive(sock)[12] != 0x11:
+                            pass
+                        send_event(sock, 0x21, bytes.fromhex('AABBCCDDEEFF00'))
+                        time.sleep(.1)
+                        os.write(master, b'list\n')
+                        deadline = time.monotonic() + 3
+                        while True:
+                            log.seek(0)
+                            output = log.read()
+                            if '最近电量=100%' in output:
+                                break
+                            assert time.monotonic() < deadline, output
+                            time.sleep(.05)
+                        assert 'ID=005  MAC=AA:BB:CC:DD:EE:FF' in output, output
+                        assert '更新时间=' in output and '状态=未连接' in output, output
+                        assert '设备 ID=005 MAC=AA:BB:CC:DD:EE:FF' in output, output
+
                 process.terminate()
                 assert process.wait(timeout=3) == 0, 'interactive shutdown failed'
                 log.seek(0)

@@ -12,8 +12,12 @@ namespace iot {
 
 enum class LogLevel { debug, info, warning, error };
 
-inline void log(LogLevel level, const std::string& message) {
+inline std::mutex& console_mutex() {
   static std::mutex mutex;
+  return mutex;
+}
+
+inline void log(LogLevel level, const std::string& message) {
   const auto now = std::chrono::system_clock::now();
   const auto time = std::chrono::system_clock::to_time_t(now);
   std::tm tm{};
@@ -27,7 +31,7 @@ inline void log(LogLevel level, const std::string& message) {
                      : level == LogLevel::info    ? "INFO"
                      : level == LogLevel::warning ? "WARN"
                                                   : "ERROR";
-  std::lock_guard<std::mutex> lock(mutex);  //互斥锁
+  std::lock_guard<std::mutex> lock(console_mutex());  //互斥锁
   std::clog << std::put_time(&tm, "%F %T") << " [" << name << "] " << message << '\n';
 }
 

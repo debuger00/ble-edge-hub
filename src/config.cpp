@@ -175,6 +175,7 @@ AppConfig AppConfig::load(const std::filesystem::path& path) {
         if (key == "mac") device->mac = normalize_mac(value);
         else if (key == "type") device->type = value;
         else if (key == "id") device->id = value;
+        else if (key == "enabled") device->enabled = parse_bool(value);
       }
     }
   } catch (const std::exception& error) {

@@ -1,6 +1,9 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <algorithm>
+#include <cctype>
+#include <iomanip>
 #include <csignal>
 #include <poll.h>
 #include <filesystem>
@@ -51,43 +54,121 @@ std::string device_list_json(const iot::AppConfig& config) {
   return out.str();
 }
 
-void print_gateways(const iot::services::TcpServer& server) {
+const char* state_label(iot::ConnectionState state) {
+  using S = iot::ConnectionState;
+  switch (state) {
+    case S::disconnected: return "已断开";
+    case S::disconnecting: return "断开中";
+    case S::searching: return "搜索中";
+    case S::connecting: return "连接中";
+    case S::connected: return "已连接";
+    case S::enabling_notifications: return "启用通知中";
+    case S::ready: return "就绪";
+    default: return "未知";
+  }
+}
+
+const iot::DeviceConfig* resolve_device(const iot::AppConfig& config, std::string target) {
+  std::transform(target.begin(), target.end(), target.begin(),
+                 [](unsigned char c) { return std::toupper(c); });
+  for (const auto& device : config.devices) {
+    std::string id = device.id;
+    std::transform(id.begin(), id.end(), id.begin(), [](unsigned char c) { return std::toupper(c); });
+    if (device.mac == target || id == target) return &device;
+  }
+  // Accept 5 for 005, but never silently choose among ambiguous numeric IDs.
+  const auto numeric = [](const std::string& value) {
+    return !value.empty() && value.find_first_not_of("0123456789") == std::string::npos;
+  };
+  const auto normalized = [](const std::string& value) {
+    const auto first = value.find_first_not_of('0');
+    return first == std::string::npos ? std::string("0") : value.substr(first);
+  };
+  const iot::DeviceConfig* match = nullptr;
+  if (numeric(target)) for (const auto& device : config.devices) {
+    if (numeric(device.id) && normalized(device.id) == normalized(target)) {
+      if (match) return nullptr;
+      match = &device;
+    }
+  }
+  return match;
+}
+
+void print_gateways(const iot::services::TcpServer& server, const iot::AppConfig& config,
+                    const iot::services::DataPipeline& pipeline) {
+  std::ostringstream out;
   const auto snapshots = server.snapshots();
-  if (snapshots.empty()) {
-    std::cout << "当前没有网关连接，请稍候再使用 list 刷新。\n";
-    return;
-  }
-  for (const auto& gateway : snapshots) {
-    std::cout << "网关 " << gateway.id << "  " << gateway.remote_address
+  const auto batteries = pipeline.batteries();
+  out << "\n网关与设备状态\n" << std::string(90, '-') << '\n';
+  if (snapshots.empty()) out << "暂无网关连接。以下为已配置设备及本次服务运行期间的最近电量。\n";
+  for (const auto& gateway : snapshots)
+    out << "网关 " << gateway.id << "  " << gateway.remote_address
               << (gateway.active ? " [在线]" : " [离线]") << '\n';
-    std::cout << "=========================================" << '\n';
-    for (const auto& device : gateway.discovered)
-      std::cout << "  发现: " << device.mac << " RSSI=" << device.rssi << '\n';
-    std::cout << "=========================================" << '\n';
-    for (const auto& device : gateway.connected)
-      std::cout << "  连接: " << device.mac << " state=" << static_cast<int>(device.state) << '\n';
+  for (const auto& device : config.devices) {
+    out << "\nID=" << (device.id.empty() ? "-" : device.id) << "  MAC=" << device.mac
+              << "  类型=" << device.type << (device.enabled ? "" : " [已禁用]") << '\n';
+    bool found = false;
+    for (const auto& gateway : snapshots) {
+      if (!gateway.active) continue;
+      const auto linked = std::find_if(gateway.connected.begin(), gateway.connected.end(),
+          [&](const auto& item) { return item.mac == device.mac; });
+      const auto scanned = std::find_if(gateway.discovered.begin(), gateway.discovered.end(),
+          [&](const auto& item) { return item.mac == device.mac; });
+      if (linked != gateway.connected.end() || scanned != gateway.discovered.end()) {
+        found = true;
+        out << "  网关=" << gateway.id << "  状态="
+                  << (linked != gateway.connected.end() ? state_label(linked->state) : "未连接（曾扫描到）");
+        if (scanned != gateway.discovered.end()) {
+          const auto scan_time = iot::Clock::to_time_t(scanned->last_seen);
+          std::tm scan_tm{};
+          localtime_r(&scan_time, &scan_tm);
+          const auto scan_age = std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::seconds>(
+              iot::Clock::now() - scanned->last_seen).count());
+          out << "  最近扫描 RSSI=" << scanned->rssi << " dBm"
+              << "  扫描时间=" << std::put_time(&scan_tm, "%F %T")
+              << "（本机时间，" << scan_age << " 秒前）";
+        }
+        out << '\n';
+      }
+    }
+    if (!found) out << "  状态=未连接 / 暂无状态\n";
+    const auto battery = batteries.find(device.mac);
+    if (battery == batteries.end()) out << "  最近电量=暂无记录\n";
+    else {
+      const auto time = iot::Clock::to_time_t(battery->second.received_at);
+      std::tm tm{};
+      localtime_r(&time, &tm);
+      const auto age = std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::seconds>(
+          iot::Clock::now() - battery->second.received_at).count());
+      out << "  最近电量=" << battery->second.level << "%  更新时间=" << std::put_time(&tm, "%F %T")
+                << "（本机时间，" << age << " 秒前）\n";
+    }
   }
+  out << "\n共 " << config.devices.size() << " 台配置设备；就绪不代表持续收到采样。\n"
+            << "电量每 " << config.battery_interval_seconds << " 秒查询；离线时保留旧值，服务重启后重新获取。\n";
+  std::lock_guard<std::mutex> lock(iot::console_mutex());
+  std::cout << out.str() << std::flush;
 }
 
 void print_command_menu() {
   std::cout << "\n"
             << std::string(60, '=') << '\n'
             << "可用命令：\n"
-            << "  list                         - 查看网关和设备状态\n"
+            << "  list / ls                    - 查看状态、最近电量和更新时间\n"
             << "  devices                      - 查看设备 ID 与 MAC 对照表\n"
             << "  gateway-info <网关ID>         - 查询过滤、扫描和固件信息\n"
             << "  scan-on <网关ID>              - 开启扫描输出并查询信息\n"
             << "  stats                        - 查看数据管道和队列状态\n"
-            << "  connect <网关ID> <设备MAC>   - 连接指定传感器\n"
-            << "    示例：connect 0 3F:B8:12:EE:3C:37\n"
-            << "  disconnect <网关ID> <设备MAC> - 断开指定传感器\n"
-            << "    示例：disconnect 0 3F:B8:12:EE:3C:37\n"
+            << "  connect <网关ID> <设备ID或MAC>   - 连接指定传感器\n"
+            << "    示例：connect 0 005（也可输入 5 或完整 MAC）\n"
+            << "  disconnect <网关ID> <设备ID或MAC> - 断开指定传感器\n"
+            << "    示例：disconnect 0 005\n"
             << "  help / h / ?                 - 再次显示帮助\n"
             << "  q / quit / exit              - 停止服务并退出\n"
             << std::string(60, '=') << '\n';
 }
 
-void print_command_prompt() { std::cout << "请输入命令（输入 help 查看帮助）> " << std::flush; }
+void print_command_prompt() { std::cout << "iot> " << std::flush; }
 
 void print_pipeline_stats(const iot::services::DataPipeline& pipeline,
                           const iot::services::DatabaseWriter& database,
@@ -148,10 +229,18 @@ int main(int argc, char** argv) {
     health.start();
     if (isatty(STDIN_FILENO)) {
       std::cout << "服务已启动。\n";
-      print_command_menu();
+      {
+        std::lock_guard<std::mutex> lock(iot::console_mutex());
+        print_command_menu();
+        std::cout << "电量查询间隔：" << config.battery_interval_seconds << " 秒。";
+        if (config.collection_schedule.enabled)
+          std::cout << "采集时段：" << config.collection_schedule.start_time << "–"
+                    << config.collection_schedule.stop_time << "（北京时间）。";
+        std::cout << "\n提示：list 查看状态，connect 0 005 按 ID 连接设备。\n";
+      }
       std::string line;
       while (!interrupted) {
-        print_command_prompt();
+        { std::lock_guard<std::mutex> lock(iot::console_mutex()); print_command_prompt(); }
         // Wait with a timeout so SIGINT/SIGTERM can leave an idle interactive CLI.
         // std::getline alone may restart its blocking read after the signal handler.
         pollfd input_descriptor{STDIN_FILENO, POLLIN, 0};
@@ -163,10 +252,12 @@ int main(int argc, char** argv) {
         std::string command, mac;
         std::uint64_t gateway{};
         input >> command;
-        if (command.empty()) {
-          std::cout << "未输入命令，请输入 list、stats、connect、disconnect、help 或 q。\n";
-          continue;
-        }
+        if (command.empty()) continue;
+        std::transform(command.begin(), command.end(), command.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        // Keep each CLI response together with respect to background logs.
+        // Network command dispatch can log, so it is deliberately outside this lock.
+
 
         if (command == "q" || command == "quit" || command == "exit") {
           std::cout << "正在停止服务，请稍候...\n";
@@ -176,11 +267,12 @@ int main(int argc, char** argv) {
           print_command_menu();
           continue;
         }
-        if (command == "list") {
-          print_gateways(tcp);
+        if (command == "list" || command == "ls") {
+          print_gateways(tcp, config, pipeline);
           continue;
         }
         if (command == "devices") {
+          std::lock_guard<std::mutex> lock(iot::console_mutex());
           std::cout << "ID\tMAC\t\t\t类型\n";
           for (const auto& device : config.devices)
             std::cout << (device.id.empty() ? "-" : device.id) << '\t' << device.mac << '\t' << device.type << '\n';
@@ -198,13 +290,15 @@ int main(int argc, char** argv) {
             continue;
           }
           if (!tcp.inspect_gateway(gateway, command == "scan-on"))
-            std::cerr << "网关不存在\n";
+            std::cerr << "网关不存在，请使用 list 查看网关 ID。\n";
+          else
+            std::cout << "查询请求已排队：网关 ID=" << gateway << "，结果将显示在后续日志中。\n";
           continue;
         }
         if (command == "connect" || command == "disconnect") {
           if (!(input >> gateway >> mac)) {
             std::cerr << "命令格式不完整。\n"
-                      << "正确格式：" << command << " <网关ID> <设备MAC>\n"
+                      << "正确格式：" << command << " <网关ID> <设备ID或MAC>\n"
                       << "示例：" << command << " 0 3F:B8:12:EE:3C:37\n";
             continue;
           }
@@ -212,15 +306,35 @@ int main(int argc, char** argv) {
           std::string extra;
           if (input >> extra) {
             std::cerr << "参数过多：" << extra << "\n"
-                      << "请使用：" << command << " <网关ID> <设备MAC>\n";
+                      << "请使用：" << command << " <网关ID> <设备ID或MAC>\n";
             continue;
           }
 
+          const auto* device = resolve_device(config, mac);
+          if (!device) {
+            std::cerr << "设备未配置或 ID 不明确：" << mac << "。输入 devices 查看 ID 与 MAC。\n";
+            continue;
+          }
+          mac = device->mac;
+          if (command == "connect" && !device->enabled) {
+            std::cerr << "设备已禁用：ID=" << device->id << " MAC=" << mac << "，请修改配置后重启。\n";
+            continue;
+          }
+          if (command == "connect" && !config.collection_schedule.allows(iot::Clock::now())) {
+            std::cerr << "当前不在采集时段，无法连接：ID=" << device->id << " MAC=" << mac
+                      << "；北京时间 " << config.collection_schedule.start_time << "–"
+                      << config.collection_schedule.stop_time << "。\n";
+            continue;
+          }
           const bool success =
               command == "connect" ? tcp.connect_device(gateway, mac) : tcp.disconnect_device(gateway, mac);
           if (success) {
-            std::cout << (command == "connect" ? "连接" : "断开") << "命令已发送：网关 ID=" << gateway
-                      << "，设备 MAC=" << mac << '\n';
+            std::cout << (command == "connect" ? "连接" : "断开") << "请求已排队：网关 ID=" << gateway
+                      << "，设备 ID=" << device->id << " MAC=" << mac << '\n';
+            std::cout << "请用 list 查看执行后的实际状态。\n";
+            if (command == "disconnect" && config.collection_schedule.enabled &&
+                config.collection_schedule.allows(iot::Clock::now()))
+              std::cout << "该设备本采集时段暂停自动重连；下一采集时段恢复。\n";
           } else {
             std::cerr << (command == "connect" ? "连接" : "断开")
                       << "命令发送失败。请确认网关 ID、设备 MAC 已配置，并使用 list 查看状态。\n";

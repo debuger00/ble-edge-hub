@@ -36,7 +36,17 @@ void DataPipeline::publish(SensorSample sample) {
   }
 }
 
+std::unordered_map<std::string, BatterySnapshot> DataPipeline::batteries() const {
+  std::lock_guard<std::mutex> lock(battery_mutex_);
+  return batteries_;
+}
+
 void DataPipeline::publish(const SensorStatus& status) {
+  if (status.battery_level > 100) return;
+  {
+    std::lock_guard<std::mutex> lock(battery_mutex_);
+    batteries_[status.mac] = BatterySnapshot{status.battery_level, Clock::now()};
+  }
   if (!websocket_.broadcast(battery_json(status))) {
     const auto count = websocket_rejected_.fetch_add(1, std::memory_order_relaxed) + 1;
     report_drop("websocket", count);

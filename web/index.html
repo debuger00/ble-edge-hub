@@ -31,11 +31,11 @@
                     <label for="display-rate" class="mr-2">波形显示</label>
                     <div class="select is-small">
                         <select id="display-rate">
-                            <option value="0">完整采样（25 Hz）</option>
-                            <option value="10">省流显示（10 Hz）</option>
+                            <option value="0">完整采样（按设备设置）</option>
+                            <option value="10" selected>省流显示（最高 10 Hz）</option>
                         </select>
                     </div>
-                    <span class="help ml-3">图表每秒刷新 15 次；省流显示不影响原始数据保存。</span>
+                    <span class="help ml-3">完整模式显示收到的全部采样；省流模式限制显示数据频率，不改变传感器采样率或原始数据保存。</span>
                 </div>
                 <p class="help mb-3">电量显示最近一次上报值和时间；离线后保留，并保存在当前浏览器中。</p>
                 <div id="device-selector" class="buttons are-small">
@@ -64,7 +64,7 @@
         </div>
     </section>
 
-    <script src="app.js?v=20261018-dashboard" defer></script>
+    <script src="app.js?v=20261018-default-10hz" defer></script>
 </body>
 
 </html>
