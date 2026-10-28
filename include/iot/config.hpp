@@ -1,7 +1,7 @@
 #pragma once
 
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -18,12 +18,12 @@ struct EndpointConfig {
 struct SensorProfile {
   std::string name;
   int frequency_hz{25};
-  std::uint16_t subscribe_tag{0x0fff}; // IMU948 fields; legacy default when omitted.
+  std::uint16_t subscribe_tag{0x0fff};  // IMU948 fields; legacy default when omitted.
   std::uint16_t notify_handle{};
   std::uint16_t cccd_handle{};
   std::uint16_t write_handle{};
   std::optional<std::uint16_t> command_handle;
-  std::optional<std::uint16_t> battery_handle; // MD9930 FFF2 read value handle.
+  std::optional<std::uint16_t> battery_handle;  // MD9930 FFF2 read value handle.
 };
 
 struct DeviceConfig {
@@ -62,7 +62,7 @@ struct AlertConfig {
   int smtp_timeout_seconds{15};
   std::string smtp_host;
   int smtp_port{465};
-  std::string smtp_security{"ssl"}; // ssl, starttls, none
+  std::string smtp_security{"ssl"};  // ssl, starttls, none
   std::string smtp_username;
   std::string smtp_password;
   std::string from_email;
@@ -82,7 +82,7 @@ struct AppConfig {
   CollectionSchedule collection_schedule;
   AlertConfig alerts;
   std::unordered_map<std::string, SensorProfile> sensor_types;
-  std::vector<DeviceConfig> devices;
+  std::vector<DeviceConfig> devices;  // 这里是devices
 
   static AppConfig load(const std::filesystem::path& path);
   const SensorProfile& profile_for_mac(const std::string& mac) const;
